@@ -8,9 +8,11 @@ pub mod codex;
 pub mod workbuddy;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::model::{
-    AgentKind, FileOutcome, ParsedSession, ProjectOutcome, ProjectSummary, SessionSummary,
+    AgentKind, DayActivity, FileOutcome, ParsedSession, ProjectOutcome, ProjectSummary,
+    SessionSummary,
 };
 
 pub trait AgentAdapter {
@@ -18,8 +20,29 @@ pub trait AgentAdapter {
     fn list_projects(&self) -> Vec<ProjectSummary>;
 
     /// 解析该项目下所有会话，含逐文件明细。
-    /// 各家 adapter 只需实现这一个，下面两个视图都从它派生。
+    /// 各家 adapter 只需实现这一个，下面几个视图都从它派生。
     fn parse_project(&self, project_id: &str) -> Vec<ParsedSession>;
+
+    /// 解析该 agent 下所有项目。热力图和全局搜索要用。
+    /// 首次调用会全量解析，之后走缓存。
+    fn parse_all(&self) -> Vec<ParsedSession> {
+        self.list_projects().iter().flat_map(|p| self.parse_project(&p.id)).collect()
+    }
+
+    /// 按天聚合的活动量，供热力图。
+    fn daily_activity(&self) -> Vec<DayActivity> {
+        let mut days: BTreeMap<String, (u32, usize)> = BTreeMap::new();
+        for ps in self.parse_all() {
+            for (day, n) in &ps.daily {
+                let e = days.entry(day.clone()).or_insert((0, 0));
+                e.0 += n;
+                e.1 += 1;
+            }
+        }
+        days.into_iter()
+            .map(|(day, (events, sessions))| DayActivity { day, events, sessions })
+            .collect()
+    }
 
     /// 按时间倒序的会话列表。
     fn list_sessions(&self, project_id: &str) -> Vec<SessionSummary> {
@@ -135,6 +158,26 @@ pub fn adapter_for(kind: AgentKind) -> Box<dyn AgentAdapter> {
         AgentKind::Codex => Box::new(codex::CodexAdapter),
         AgentKind::WorkBuddy => Box::new(workbuddy::WorkBuddyAdapter),
     }
+}
+
+/// 逐个走缓存解析，最后统一落盘一次。
+/// 各家 adapter 的 `parse_project` 都该经由它，免得各写一遍缓存逻辑。
+pub fn cached_collect<F>(paths: Vec<PathBuf>, parse: F) -> Vec<ParsedSession>
+where
+    F: Fn(&Path) -> Option<ParsedSession>,
+{
+    let out: Vec<ParsedSession> =
+        paths.iter().filter_map(|p| crate::index::get_or_parse(p, || parse(p))).collect();
+    crate::index::flush();
+    out
+}
+
+/// epoch 毫秒 → 本地日期 `YYYY-MM-DD`。
+///
+/// 热力图按用户所在时区的「天」划分，不能用 UTC —— 否则晚上的活动会被算到第二天。
+pub fn local_day(ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
 }
 
 /// 最近多久内有写入就算「进行中」。

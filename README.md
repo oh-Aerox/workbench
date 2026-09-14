@@ -10,10 +10,20 @@
 2. 任何写操作先过 `paths::assert_app_owned`，目标不在应用数据目录内直接 panic（见 `paths.rs` 单测）
 3. `tauri.conf.json` 不开放 fs / shell 权限，前端拿不到任何写能力
 
-索引缓存只落在应用自己的目录：
+解析缓存只落在应用自己的目录：
 
-- Windows `%LOCALAPPDATA%\AgentWorkbench\`
-- macOS `~/Library/Application Support/AgentWorkbench/`
+- Windows `%LOCALAPPDATA%\AgentWorkbench\parse-cache.json`
+- macOS `~/Library/Application Support/AgentWorkbench/parse-cache.json`
+
+文件监听（`watcher.rs`）只订阅文件系统事件，不读也不写被监听的文件；真正的重新解析发生在前端收到通知后主动重新调命令时，届时仍走 `open_readonly`。
+
+## 增量缓存
+
+全量解析本机数据约 860 ms，缓存后 64 ms（**13.5 倍**）。缓存以 `(绝对路径, 文件大小, mtime)` 为键，三者全都没变才复用——agent 写会话文件必然改变大小和 mtime，不会漏更新。
+
+**没有用 SQLite**：rusqlite(bundled) 会给二进制加约 1.5–2 MB，而数据规模只是几十场会话、秒级解析。为需求 5（体积尽可能小）这笔不划算，JSON 缓存同样是增量且零新依赖。全局搜索同理走内存扫描，没引全文索引。
+
+⚠️ 改动任何 adapter 的统计口径后，必须给 `index.rs` 的 `VERSION` +1，否则旧缓存会以新字段含义被读出来。版本对不上时缓存整个丢弃重建。
 
 ## 数据来源
 
@@ -68,6 +78,8 @@ cargo test                           # 只读守卫 + 解析启发式的单测
 cargo run --example scan             # 列出本机所有 agent 和项目
 cargo run --example scan -- full     # 连每场会话的统计一起列
 cargo run --example scan -- outcome  # 列每个项目的成果盘点
+cargo run --example scan -- heat     # 按天活动量 + 缓存冷热耗时对比
+cargo run --example scan -- find xxx # 全局搜索
 ```
 
 出包：
@@ -106,21 +118,27 @@ npx tauri icon src-tauri/icons/source.png
 ## 结构
 
 ```
-src/                       Svelte 5 前端，无 UI 库、无图表库（条形图手写，省体积）
-  App.svelte               三栏骨架 + agent 侧栏
+src/                       Svelte 5 前端，无 UI 库、无图表库（热力图和条形图手写）
+  App.svelte               三栏骨架 + agent 侧栏 + 搜索框
   lib/ProjectList.svelte   项目列表
-  lib/DetailPane.svelte    成果 / 会话 两个 tab
+  lib/DetailPane.svelte    右栏路由：搜索结果 / 项目详情 / agent 概览
+  lib/AgentOverview.svelte agent 概览：热力图 + 活跃统计
+  lib/Heatmap.svelte       近 26 周日历热力图
   lib/OutcomeView.svelte   成果盘点：文件改动排行 + 会话贡献排行
   lib/SessionList.svelte   按时间倒序的会话卡片
+  lib/SearchResults.svelte 搜索结果 + 关键词高亮
 src-tauri/
   src/model.rs             跨 agent 统一数据模型
   src/paths.rs             路径解析 + 只读守卫（含单测）
+  src/index.rs             增量解析缓存（唯一写磁盘处）
+  src/watcher.rs           agent 目录监听，去抖后通知前端
   src/commands.rs          暴露给前端的只读命令
   src/adapters/            每家 agent 一个实现 + 聚合逻辑
   examples/scan.rs         命令行冒烟检查，不起窗口
 ```
 
-两条约定：
+三条约定：
 
 - **按需解析**：`list_projects` 只做目录枚举和 stat，保证首屏秒开；`parse_project` 才逐行解析该项目的 JSONL
-- **adapter 只实现一个方法**：各家只需实现 `parse_project`，`list_sessions`（时间序）和 `project_outcome`（成果聚合）都由 trait 默认方法从它派生
+- **adapter 只实现一个方法**：各家只需实现 `parse_project`，`list_sessions`（时间序）、`project_outcome`（成果聚合）、`daily_activity`（热力图）都由 trait 默认方法从它派生
+- **跨天活动必须逐事件归档**：会话可能跨多天（本机最长一场跨 4 天），热力图不能用起止时间推算，要在解析时按事件时间戳逐条归到本地日期

@@ -1,5 +1,13 @@
 <script>
-  import { listAgents, listProjects, listSessions, projectOutcome } from './lib/api.js'
+  import { listen } from '@tauri-apps/api/event'
+  import {
+    listAgents,
+    listProjects,
+    listSessions,
+    projectOutcome,
+    agentActivity,
+    search as searchApi,
+  } from './lib/api.js'
   import { relTime } from './lib/format.js'
   import ProjectList from './lib/ProjectList.svelte'
   import DetailPane from './lib/DetailPane.svelte'
@@ -11,26 +19,46 @@
   let activeProjectName = $state('')
   let sessions = $state([])
   let outcome = $state(null)
+  let days = $state([])
   let loadingProjects = $state(false)
   let loadingSessions = $state(false)
+  let loadingActivity = $state(false)
   let error = $state(null)
 
-  // 需求 6：先按 agent 划分。切 agent 会清掉右侧两栏，避免串数据。
-  async function selectAgent(agent) {
+  let query = $state('')
+  let hits = $state([])
+  let searching = $state(false)
+  let searchTimer = null
+
+  let currentAgent = $derived(agents.find((a) => a.id === activeAgent) ?? null)
+
+  async function selectAgent(agent, keepProject = false) {
     if (!agent.installed) return
     activeAgent = agent.id
-    activeProject = null
-    activeProjectName = ''
-    sessions = []
-    outcome = null
+    if (!keepProject) {
+      activeProject = null
+      activeProjectName = ''
+      sessions = []
+      outcome = null
+    }
     projects = []
+    days = []
     loadingProjects = true
+    loadingActivity = true
     try {
       projects = await listProjects(agent.id)
     } catch (e) {
       error = String(e)
     } finally {
       loadingProjects = false
+    }
+    // 热力图要全量解析，单独等，不挡住项目列表
+    try {
+      days = await agentActivity(agent.id)
+    } catch (e) {
+      error = String(e)
+    } finally {
+      loadingActivity = false
     }
   }
 
@@ -41,7 +69,7 @@
     outcome = null
     loadingSessions = true
     try {
-      // 两个视图都要解析同一批 JSONL，一次并发取完，切 tab 就不用再等
+      // 两个视图解析的是同一批 JSONL，一次并发取完，切 tab 就不用再等
       const [o, s] = await Promise.all([
         projectOutcome(activeAgent, project.id),
         listSessions(activeAgent, project.id),
@@ -55,6 +83,49 @@
     }
   }
 
+  /** 搜索结果点进去：跳到对应 agent 的对应项目 */
+  async function openHit(hit) {
+    query = ''
+    hits = []
+    const agent = agents.find((a) => a.id === hit.agent)
+    if (agent && agent.id !== activeAgent) {
+      await selectAgent(agent, true)
+    }
+    const project =
+      projects.find((p) => p.id === hit.projectId) ??
+      (await listProjects(hit.agent)).find((p) => p.id === hit.projectId)
+    if (project) await selectProject(project)
+  }
+
+  // 输入去抖，避免每敲一个字都触发一次全量扫描
+  function onQueryInput() {
+    clearTimeout(searchTimer)
+    const q = query.trim()
+    if (!q) {
+      hits = []
+      searching = false
+      return
+    }
+    searching = true
+    searchTimer = setTimeout(async () => {
+      try {
+        hits = await searchApi(q)
+      } catch (e) {
+        error = String(e)
+      } finally {
+        searching = false
+      }
+    }, 280)
+  }
+
+  async function refreshAgents() {
+    try {
+      agents = await listAgents()
+    } catch (e) {
+      error = String(e)
+    }
+  }
+
   $effect(() => {
     listAgents()
       .then((list) => {
@@ -63,6 +134,19 @@
         if (first) selectAgent(first)
       })
       .catch((e) => (error = String(e)))
+
+    // agent 在后台写会话文件时自动刷新当前视图
+    const un = listen('agent-data-changed', async (ev) => {
+      await refreshAgents()
+      if (ev.payload !== activeAgent) return
+      projects = await listProjects(activeAgent)
+      agentActivity(activeAgent).then((d) => (days = d))
+      if (activeProject) {
+        const p = projects.find((x) => x.id === activeProject)
+        if (p) selectProject(p)
+      }
+    })
+    return () => un.then((f) => f())
   })
 </script>
 
@@ -74,10 +158,18 @@
       <span class="ro" title="本应用以只读方式访问 agent 数据，不会写入任何 agent 工作区">只读</span>
     </div>
 
+    <input
+      class="search"
+      type="search"
+      placeholder="搜索会话 / 文件 / 项目"
+      bind:value={query}
+      oninput={onQueryInput}
+    />
+
     {#each agents as agent (agent.id)}
       <button
         class="agent"
-        class:active={activeAgent === agent.id}
+        class:active={activeAgent === agent.id && !query.trim()}
         class:off={!agent.installed}
         style="--c: var(--{agent.id})"
         onclick={() => selectAgent(agent)}
@@ -113,11 +205,18 @@
   />
 
   <DetailPane
+    agent={currentAgent}
     {outcome}
     {sessions}
+    {days}
+    {hits}
+    {query}
+    {searching}
+    {loadingActivity}
     loading={loadingSessions}
     hasProject={!!activeProject}
     projectName={activeProjectName}
+    onopen={openHit}
   />
 </div>
 
@@ -142,15 +241,10 @@
     font-weight: 600;
     font-size: 12px;
     letter-spacing: 0.02em;
-    padding: 6px 6px 14px;
+    padding: 6px 6px 12px;
     color: var(--dim);
   }
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
   .ro {
     margin-left: auto;
     font-size: 10px;
@@ -161,6 +255,20 @@
     padding: 1px 4px;
     cursor: help;
   }
+
+  .search {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 6px 8px;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+  .search:focus { outline: none; border-color: var(--accent); }
+  .search::placeholder { color: var(--dimmer); }
 
   .agent {
     width: 100%;
