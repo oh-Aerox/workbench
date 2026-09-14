@@ -1,14 +1,16 @@
 <script>
-  import { listAgents, listProjects, listSessions } from './lib/api.js'
+  import { listAgents, listProjects, listSessions, projectOutcome } from './lib/api.js'
   import { relTime } from './lib/format.js'
   import ProjectList from './lib/ProjectList.svelte'
-  import SessionList from './lib/SessionList.svelte'
+  import DetailPane from './lib/DetailPane.svelte'
 
   let agents = $state([])
   let activeAgent = $state(null)
   let projects = $state([])
   let activeProject = $state(null)
+  let activeProjectName = $state('')
   let sessions = $state([])
+  let outcome = $state(null)
   let loadingProjects = $state(false)
   let loadingSessions = $state(false)
   let error = $state(null)
@@ -18,7 +20,9 @@
     if (!agent.installed) return
     activeAgent = agent.id
     activeProject = null
+    activeProjectName = ''
     sessions = []
+    outcome = null
     projects = []
     loadingProjects = true
     try {
@@ -32,10 +36,18 @@
 
   async function selectProject(project) {
     activeProject = project.id
+    activeProjectName = project.path
     sessions = []
+    outcome = null
     loadingSessions = true
     try {
-      sessions = await listSessions(activeAgent, project.id)
+      // 两个视图都要解析同一批 JSONL，一次并发取完，切 tab 就不用再等
+      const [o, s] = await Promise.all([
+        projectOutcome(activeAgent, project.id),
+        listSessions(activeAgent, project.id),
+      ])
+      outcome = o
+      sessions = s
     } catch (e) {
       error = String(e)
     } finally {
@@ -100,7 +112,13 @@
     onselect={selectProject}
   />
 
-  <SessionList {sessions} loading={loadingSessions} hasProject={!!activeProject} />
+  <DetailPane
+    {outcome}
+    {sessions}
+    loading={loadingSessions}
+    hasProject={!!activeProject}
+    projectName={activeProjectName}
+  />
 </div>
 
 <style>
