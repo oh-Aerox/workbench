@@ -284,5 +284,14 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
     // 存的是剥掉注入上下文后的真人输入，否则搜索会被 8KB 注入块淹没
     let searchable = first_prompt.as_deref().map(super::strip_injected);
 
-    Some(ParsedSession { summary, files: touches, daily, first_prompt: searchable })
+    // WorkBuddy 的工具集里没有计划/待办类工具（实测只有 Bash/Glob/Write/Read/
+    // PowerShell/Grep 等），~/.workbuddy/plans/ 目录存在但为空且无会话关联字段，
+    // 所以计划清单对它恒为空。等它哪天加了这类工具再补。
+    Some(ParsedSession {
+        summary,
+        files: touches,
+        daily,
+        first_prompt: searchable,
+        plans: Vec::new(),
+    })
 }

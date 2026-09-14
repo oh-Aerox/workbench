@@ -17,6 +17,7 @@ pub fn run() {
             commands::list_projects,
             commands::list_sessions,
             commands::project_outcome,
+            commands::project_plans,
             commands::agent_activity,
             commands::search,
         ])

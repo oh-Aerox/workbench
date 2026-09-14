@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::model::{
-    AgentKind, DayActivity, FileOutcome, ParsedSession, ProjectOutcome, ProjectSummary,
+    AgentKind, DayActivity, FileOutcome, ParsedSession, PlanRecord, ProjectOutcome, ProjectSummary,
     SessionSummary,
 };
 
@@ -27,6 +27,26 @@ pub trait AgentAdapter {
     /// 首次调用会全量解析，之后走缓存。
     fn parse_all(&self) -> Vec<ParsedSession> {
         self.list_projects().iter().flat_map(|p| self.parse_project(&p.id)).collect()
+    }
+
+    /// 该项目下的全部计划 / 待办，按时间倒序。
+    fn project_plans(&self, project_id: &str) -> Vec<PlanRecord> {
+        let kind = self.kind();
+        let mut out: Vec<PlanRecord> = self
+            .parse_project(project_id)
+            .into_iter()
+            .flat_map(|ps| {
+                let (id, title) = (ps.summary.id.clone(), ps.summary.title.clone());
+                ps.plans.into_iter().map(move |entry| PlanRecord {
+                    agent: kind,
+                    session_id: id.clone(),
+                    session_title: title.clone(),
+                    entry,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| b.entry.at.cmp(&a.entry.at));
+        out
     }
 
     /// 按天聚合的活动量，供热力图。
@@ -172,6 +192,50 @@ where
     out
 }
 
+/// 从计划 markdown 里抽勾选项 `- [ ]` / `- [x]`。
+///
+/// 注意只认真正的勾选框，不把普通列表项当待办 —— 计划正文里的普通 `-` 列表
+/// 大多是选型说明、约束条件之类，混进待办清单会满屏噪声。
+pub fn extract_checkboxes(md: &str) -> Vec<crate::model::TodoItem> {
+    md.lines()
+        .filter_map(|line| {
+            let t = line.trim_start();
+            let rest = t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))?;
+            let rest = rest.trim_start();
+            let (mark, text) = if let Some(r) = rest.strip_prefix("[ ]") {
+                ("pending", r)
+            } else if let Some(r) = rest.strip_prefix("[x]").or_else(|| rest.strip_prefix("[X]")) {
+                ("completed", r)
+            } else {
+                return None;
+            };
+            let text = text.trim();
+            (!text.is_empty()).then(|| crate::model::TodoItem {
+                text: text.to_string(),
+                status: mark.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 取 markdown 的首个标题行作标题；没有标题就退回首个非空行。
+pub fn markdown_title(md: &str) -> Option<String> {
+    let heading = md
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with('#'))
+        .map(|l| l.trim_start_matches('#').trim());
+    let fallback = || md.lines().map(str::trim).find(|l| !l.is_empty());
+
+    heading.or_else(fallback).filter(|s| !s.is_empty()).map(|s| {
+        let mut out: String = s.chars().take(50).collect();
+        if s.chars().count() > 50 {
+            out.push('…');
+        }
+        out
+    })
+}
+
 /// epoch 毫秒 → 本地日期 `YYYY-MM-DD`。
 ///
 /// 热力图按用户所在时区的「天」划分，不能用 UTC —— 否则晚上的活动会被算到第二天。
@@ -287,6 +351,35 @@ mod tests {
         let plan = "C:\\Users\\a\\.claude\\plans\\x.md";
         assert!(!starts_with_dir(plan, dir));
         assert_eq!(relative_to(plan, dir), plan);
+    }
+
+    #[test]
+    fn 勾选框只认真正的复选框() {
+        let md = "\
+# 计划
+## 选型
+- Electron + React
+- 离线优先
+## 步骤
+- [ ] 扫描目录
+- [x] 解析 EXIF
+* [X] 分组展示
+";
+        let items = extract_checkboxes(md);
+        // 「选型」下的普通列表项是说明不是待办，不能混进来
+        assert_eq!(items.len(), 3, "只有 3 个复选框");
+        assert_eq!(items[0].text, "扫描目录");
+        assert_eq!(items[0].status, "pending");
+        assert_eq!(items[1].status, "completed");
+        assert_eq!(items[2].status, "completed", "星号列表和大写 X 也要认");
+    }
+
+    #[test]
+    fn 计划标题取首个标题行() {
+        assert_eq!(markdown_title("# 本地相册应用\n\n## Context\n正文"), Some("本地相册应用".into()));
+        // 没有标题行时退回首个非空行
+        assert_eq!(markdown_title("\n\n先做扫描\n再做分组"), Some("先做扫描".into()));
+        assert_eq!(markdown_title("   \n  "), None);
     }
 
     #[test]

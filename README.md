@@ -48,6 +48,24 @@
 | 花费 | ✅ | ❌ | ❌ |
 | git 分支 | ✅ | ❌ | ❌ |
 | 模型 | ✅ | ✅ | ✅ |
+| 计划 / 待办 | ✅ | ⚠️ 未验证 | ❌ 无此工具 |
+
+## 计划 / 待办从哪来
+
+只从 agent 自己的记录里读，**不扫描项目源码**——那会把应用的读取范围从三个 agent 数据目录扩大到用户全部项目的源码树。
+
+| 来源 | 说明 |
+|---|---|
+| `ExitPlanMode` 的 `input.plan` | 计划模式产出的 markdown 全文，质量最高 |
+| `~/.claude/plans/<slug>.md` | 独立计划文件，会话记录里的 `slug` 字段负责关联 |
+| `TodoWrite` 的 `input.todos` | `[{content, status}]` 结构化清单 |
+| Codex `update_plan` | ⚠️ **本机数据里没出现过这个工具，字段形状按常见约定写、未经真实数据验证**，解析刻意做得宽容，对不上就安静跳过 |
+| WorkBuddy | 工具集里没有计划/待办类工具（实测只有 Bash/Glob/Write/Read/PowerShell/Grep 等），恒为空 |
+
+两个要点：
+
+- **只认真正的复选框** `- [ ]` / `- [x]`。计划正文里的普通 `-` 列表大多是选型说明和约束条件，当成待办会满屏噪声
+- **按正文去重**。`ExitPlanMode` 和 `plans/<slug>.md` 通常是同一份内容（前者就是把后者提交上去的），不能按 slug 比对 `source`——`ExitPlanMode` 的 source 里没有 slug
 
 Codex 没有文件历史追踪，成果盘点对它的文件清单永远是空的；WorkBuddy 只有全量快照没有增量记录，改动次数只能取快照里的 `version`。
 
@@ -80,6 +98,7 @@ cargo run --example scan -- full     # 连每场会话的统计一起列
 cargo run --example scan -- outcome  # 列每个项目的成果盘点
 cargo run --example scan -- heat     # 按天活动量 + 缓存冷热耗时对比
 cargo run --example scan -- find xxx # 全局搜索
+cargo run --example scan -- plans    # 列提取到的计划 / 待办
 ```
 
 出包：
@@ -125,6 +144,8 @@ src/                       Svelte 5 前端，无 UI 库、无图表库（热力�
   lib/AgentOverview.svelte agent 概览：热力图 + 活跃统计
   lib/Heatmap.svelte       近 26 周日历热力图
   lib/OutcomeView.svelte   成果盘点：文件改动排行 + 会话贡献排行
+  lib/PlansView.svelte     计划 / 待办清单
+  lib/Markdown.svelte      极简 markdown 渲染（不引库、不用 @html）
   lib/SessionList.svelte   按时间倒序的会话卡片
   lib/SearchResults.svelte 搜索结果 + 关键词高亮
 src-tauri/

@@ -1,7 +1,7 @@
 //! 暴露给前端的命令。全部只读，没有任何一个命令能写 agent 目录。
 use crate::adapters::adapter_for;
 use crate::model::{
-    AgentKind, AgentSummary, DayActivity, ProjectOutcome, ProjectSummary, SearchHit,
+    AgentKind, AgentSummary, DayActivity, PlanRecord, ProjectOutcome, ProjectSummary, SearchHit,
     SessionSummary,
 };
 use crate::paths::agent_root;
@@ -53,6 +53,13 @@ pub fn list_sessions(agent: String, project_id: String) -> Result<Vec<SessionSum
 pub fn project_outcome(agent: String, project_id: String) -> Result<ProjectOutcome, String> {
     let kind = AgentKind::from_id(&agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
     Ok(adapter_for(kind).project_outcome(&project_id))
+}
+
+/// 该项目下提取到的计划 / 待办清单，按时间倒序。
+#[tauri::command]
+pub fn project_plans(agent: String, project_id: String) -> Result<Vec<PlanRecord>, String> {
+    let kind = AgentKind::from_id(&agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
+    Ok(adapter_for(kind).project_plans(&project_id))
 }
 
 /// 该 agent 的按天活动量，供热力图。首次调用会全量解析，之后走缓存。
