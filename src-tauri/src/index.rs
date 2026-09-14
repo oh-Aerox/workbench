@@ -34,7 +34,8 @@ struct Store {
 }
 
 /// 当前缓存格式版本。改动任何 adapter 的统计口径都要 +1。
-const VERSION: u32 = 1;
+/// v2: ParsedSession 增加 plans 字段（计划 / 待办提取）
+const VERSION: u32 = 2;
 
 static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
 
