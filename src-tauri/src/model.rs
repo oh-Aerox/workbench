@@ -1,8 +1,10 @@
 //! 跨 agent 的统一数据模型。三家 agent 的原始 JSONL schema 各不相同，
 //! adapter 负责把它们归一到这里的结构，前端只认这一套。
-use serde::Serialize;
+use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
@@ -79,7 +81,7 @@ pub struct ProjectSummary {
 }
 
 /// 一场会话里某个文件的改动情况。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileTouch {
     pub path: String,
     /// 本场会话里被改了几次
@@ -89,11 +91,45 @@ pub struct FileTouch {
 }
 
 /// 解析一场会话的完整产出。`SessionSummary` 是给列表用的压缩视图，
-/// `files` 保留逐文件明细，供项目级成果盘点聚合。
-#[derive(Debug, Clone)]
+/// `files` 保留逐文件明细供成果盘点聚合，`daily` 供热力图。
+///
+/// 整个结构会被写进磁盘缓存，所以必须可反序列化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedSession {
     pub summary: SessionSummary,
     pub files: Vec<FileTouch>,
+    /// 本地日期 `YYYY-MM-DD` -> 当天活动事件数（对话轮 + 工具调用）。
+    /// 一场会话可能跨多天，所以必须在解析时按天拆开，不能只用起止时间。
+    pub daily: BTreeMap<String, u32>,
+    /// 首条真人 prompt 原文，供全局搜索。标题是截断过的，搜不全。
+    pub first_prompt: Option<String>,
+}
+
+/// 热力图的一格。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayActivity {
+    /// 本地日期 `YYYY-MM-DD`
+    pub day: String,
+    pub events: u32,
+    pub sessions: usize,
+}
+
+/// 全局搜索命中。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub agent: AgentKind,
+    pub project_id: String,
+    pub project_path: String,
+    pub project_name: String,
+    pub session_id: String,
+    pub title: String,
+    pub started_at: Option<i64>,
+    /// 命中位置：title / prompt / file / project
+    pub field: String,
+    /// 命中处的上下文片段，已围绕关键词裁剪
+    pub snippet: String,
 }
 
 /// 成果盘点里的一个文件。
@@ -135,7 +171,7 @@ pub struct ProjectOutcome {
 }
 
 /// 会话列表项。只读扫描得到，不含逐轮明细。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     pub agent: AgentKind,

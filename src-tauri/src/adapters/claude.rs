@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS};
+use super::{
+    cached_collect, local_day, make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS,
+};
 use crate::model::{AgentKind, FileTouch, ParsedSession, ProjectSummary, SessionSummary};
 use crate::paths::{
     agent_root, decode_project_dir, normalize_drive, open_readonly, project_display_name,
@@ -149,12 +151,13 @@ impl AgentAdapter for ClaudeAdapter {
             return Vec::new();
         };
 
-        files
+        let paths: Vec<_> = files
             .flatten()
             .map(|f| f.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-            .filter_map(|p| parse_session(&p, project_id))
-            .collect()
+            .collect();
+
+        cached_collect(paths, |p| parse_session(p, project_id))
     }
 }
 
@@ -205,6 +208,15 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
     let mut cost_usd: Option<f64> = None;
     let mut lines_added = 0i64;
     let mut lines_removed = 0i64;
+    let mut daily: BTreeMap<String, u32> = BTreeMap::new();
+
+    // 会话可能跨天（本机最长一场跨了 4 天多），活动量必须按事件时间逐条归到
+    // 当天，不能用起止时间推算
+    fn bump(daily: &mut BTreeMap<String, u32>, ts: Option<i64>, n: u32) {
+        if let Some(day) = ts.and_then(local_day) {
+            *daily.entry(day).or_insert(0) += n;
+        }
+    }
 
     for line in reader.lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -215,7 +227,8 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
             continue;
         };
 
-        if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms) {
+        let ts = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms);
+        if let Some(ts) = ts {
             started_at = Some(started_at.map_or(ts, |c: i64| c.min(ts)));
             ended_at = Some(ended_at.map_or(ts, |c: i64| c.max(ts)));
         }
@@ -244,6 +257,7 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
                     v.pointer("/origin/kind").and_then(Value::as_str) == Some("human");
                 if is_human {
                     user_turns += 1;
+                    bump(&mut daily, ts, 1);
                     if first_prompt.is_none() {
                         if let Some(text) = v.pointer("/message/content").and_then(Value::as_str) {
                             first_prompt = Some(text.to_string());
@@ -256,11 +270,14 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
                 if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {
                     models.insert(m.to_string());
                 }
+                bump(&mut daily, ts, 1);
                 if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
-                    tool_calls += blocks
+                    let n = blocks
                         .iter()
                         .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
                         .count();
+                    tool_calls += n;
+                    bump(&mut daily, ts, n as u32);
                 }
             }
             Some("file-history-delta") => {
@@ -334,5 +351,5 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         bytes,
     };
 
-    Some(ParsedSession { summary, files: touches })
+    Some(ParsedSession { summary, files: touches, daily, first_prompt })
 }

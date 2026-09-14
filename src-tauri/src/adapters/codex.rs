@@ -15,12 +15,15 @@
 //! 必须 peek 每个 rollout 的头部。Codex 会话数量通常不大，暂时可以接受；
 //! P3 上 SQLite 索引后这一步会变成增量。
 use std::collections::{BTreeMap, BTreeSet};
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS};
+use super::{
+    cached_collect, local_day, make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS,
+};
 use crate::model::{AgentKind, ParsedSession, ProjectSummary, SessionSummary};
 use crate::paths::{agent_root, normalize_drive, open_readonly, project_display_name};
 
@@ -156,11 +159,12 @@ impl AgentAdapter for CodexAdapter {
 
     fn parse_project(&self, project_id: &str) -> Vec<ParsedSession> {
         let names = thread_names();
-        collect_rollouts()
+        let paths: Vec<_> = collect_rollouts()
             .into_iter()
             .filter(|p| peek_cwd(p).as_deref() == Some(project_id))
-            .filter_map(|p| parse_session(&p, project_id, &names))
-            .collect()
+            .collect();
+
+        cached_collect(paths, |p| parse_session(p, project_id, &names))
     }
 }
 
@@ -181,6 +185,13 @@ fn parse_session(
     let mut assistant_turns = 0usize;
     let mut tool_calls = 0usize;
     let mut models: BTreeSet<String> = BTreeSet::new();
+    let mut daily: BTreeMap<String, u32> = BTreeMap::new();
+
+    fn bump(daily: &mut BTreeMap<String, u32>, ts: Option<i64>) {
+        if let Some(day) = ts.and_then(local_day) {
+            *daily.entry(day).or_insert(0) += 1;
+        }
+    }
 
     for line in reader.lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -190,7 +201,8 @@ fn parse_session(
             continue;
         };
 
-        if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms) {
+        let ts = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms);
+        if let Some(ts) = ts {
             started_at = Some(started_at.map_or(ts, |c: i64| c.min(ts)));
             ended_at = Some(ended_at.map_or(ts, |c: i64| c.max(ts)));
         }
@@ -211,6 +223,7 @@ fn parse_session(
             Some("response_item") => {
                 if v.pointer("/payload/type").and_then(Value::as_str) == Some("function_call") {
                     tool_calls += 1;
+                    bump(&mut daily, ts);
                 }
             }
             Some("event_msg") => match v.pointer("/payload/type").and_then(Value::as_str) {
@@ -218,6 +231,7 @@ fn parse_session(
                 // 大量是注入的插件说明和权限提示，算进去轮数会虚高
                 Some("user_message") => {
                     user_turns += 1;
+                    bump(&mut daily, ts);
                     if first_prompt.is_none() {
                         first_prompt = v
                             .pointer("/payload/message")
@@ -225,7 +239,10 @@ fn parse_session(
                             .map(str::to_string);
                     }
                 }
-                Some("agent_message") => assistant_turns += 1,
+                Some("agent_message") => {
+                    assistant_turns += 1;
+                    bump(&mut daily, ts);
+                }
                 _ => {}
             },
             _ => {}
@@ -271,5 +288,5 @@ fn parse_session(
     };
 
     // Codex 不做文件历史追踪，成果盘点的文件清单对它永远是空的
-    Some(ParsedSession { summary, files: Vec::new() })
+    Some(ParsedSession { summary, files: Vec::new(), daily, first_prompt })
 }
