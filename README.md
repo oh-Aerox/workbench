@@ -33,17 +33,21 @@
 |---|:--:|:--:|:--:|
 | 会话标题 | ✅ `ai-title` | ✅ `thread_name` | ⚠️ 取首条 prompt |
 | 轮数 / 工具调用 | ✅ | ✅ | ✅ |
-| 触达文件数 | ✅ | ❌ 不记录 | ✅ |
+| 文件改动排行 | ✅ | ❌ 不记录 | ✅ 仅版本号 |
 | 增删行数 | ✅ | ❌ | ❌ |
 | 花费 | ✅ | ❌ | ❌ |
 | git 分支 | ✅ | ❌ | ❌ |
 | 模型 | ✅ | ✅ | ✅ |
 
-三处解析上的坑，都已用单测钉住：
+Codex 没有文件历史追踪，成果盘点对它的文件清单永远是空的；WorkBuddy 只有全量快照没有增量记录，改动次数只能取快照里的 `version`。
+
+解析上的坑，都已用单测钉住：
 
 - **目录名编码有损**：`project-my-notes` 解码后会变成 `project\my\notes`，所以真实 cwd 一律从会话文件内容里 peek，解码只作兜底
 - **WorkBuddy 标题**：真人输入被包在 8KB 注入上下文末尾的 `<user_query>` 里，必须优先识别该标签，否则标题会变成 `OS Version: win32 Shell: bash…`
 - **盘符大小写**：Claude 记 `C:\`，WorkBuddy 记 `c:\`，不统一会让同一目录看起来像两个
+- **文件路径混用相对与绝对**：`trackedFileBackups` 的键对项目内文件是**相对路径**，只有项目外的文件（`~/.claude/plans`、临时目录）才是绝对路径。不先判断就比对前缀，会把所有文件都误判成「项目外」
+- **改动次数不能累加**：`file-history-snapshot` 里的 `trackedFileBackups` 是全量映射、每次快照重复出现，累加会把次数放大数倍。取 `version` 与 `file-history-delta` 计数的较大者
 
 ## 按 agent 划分
 
@@ -60,9 +64,10 @@ npm run tauri dev
 
 ```bash
 cd src-tauri
-cargo test                        # 只读守卫 + 解析启发式的单测
-cargo run --example scan          # 列出本机所有 agent 和项目
-cargo run --example scan -- full  # 连每场会话的统计一起列
+cargo test                           # 只读守卫 + 解析启发式的单测
+cargo run --example scan             # 列出本机所有 agent 和项目
+cargo run --example scan -- full     # 连每场会话的统计一起列
+cargo run --example scan -- outcome  # 列每个项目的成果盘点
 ```
 
 出包：
@@ -101,16 +106,21 @@ npx tauri icon src-tauri/icons/source.png
 ## 结构
 
 ```
-src/                    Svelte 5 前端，无 UI 库、无图表库（图表手写 SVG，省体积）
-  App.svelte            三栏骨架 + agent 侧栏
-  lib/ProjectList.svelte
-  lib/SessionList.svelte
+src/                       Svelte 5 前端，无 UI 库、无图表库（条形图手写，省体积）
+  App.svelte               三栏骨架 + agent 侧栏
+  lib/ProjectList.svelte   项目列表
+  lib/DetailPane.svelte    成果 / 会话 两个 tab
+  lib/OutcomeView.svelte   成果盘点：文件改动排行 + 会话贡献排行
+  lib/SessionList.svelte   按时间倒序的会话卡片
 src-tauri/
-  src/model.rs          跨 agent 统一数据模型
-  src/paths.rs          路径解析 + 只读守卫（含单测）
-  src/commands.rs       暴露给前端的只读命令
-  src/adapters/         每家 agent 一个实现 + 共用的标题提取启发式
-  examples/scan.rs      命令行冒烟检查，不起窗口
+  src/model.rs             跨 agent 统一数据模型
+  src/paths.rs             路径解析 + 只读守卫（含单测）
+  src/commands.rs          暴露给前端的只读命令
+  src/adapters/            每家 agent 一个实现 + 聚合逻辑
+  examples/scan.rs         命令行冒烟检查，不起窗口
 ```
 
-分工约定：`list_projects` 只做目录枚举和 stat，保证首屏秒开；`list_sessions` 才逐行解析该项目的 JSONL，按需付费。
+两条约定：
+
+- **按需解析**：`list_projects` 只做目录枚举和 stat，保证首屏秒开；`parse_project` 才逐行解析该项目的 JSONL
+- **adapter 只实现一个方法**：各家只需实现 `parse_project`，`list_sessions`（时间序）和 `project_outcome`（成果聚合）都由 trait 默认方法从它派生

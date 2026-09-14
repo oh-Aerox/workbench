@@ -15,14 +15,14 @@
 //! 与 Claude 的三处差异：时间戳是 epoch 毫秒（非 ISO 字符串）；模型名在
 //! `providerData.model`；目录编码首字母小写（`c--Users-...`）。
 //! 另外 WorkBuddy 不写 cost-state，所以没有花费和增删行数。
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use super::{make_title, now_ms, AgentAdapter, RUNNING_WINDOW_MS};
-use crate::model::{AgentKind, ProjectSummary, SessionSummary};
+use crate::model::{AgentKind, FileTouch, ParsedSession, ProjectSummary, SessionSummary};
 use crate::paths::{
     agent_root, decode_project_dir, normalize_drive, open_readonly, project_display_name,
 };
@@ -125,7 +125,7 @@ impl AgentAdapter for WorkBuddyAdapter {
         out
     }
 
-    fn list_sessions(&self, project_id: &str) -> Vec<SessionSummary> {
+    fn parse_project(&self, project_id: &str) -> Vec<ParsedSession> {
         let Some(root) = projects_dir() else {
             return Vec::new();
         };
@@ -134,15 +134,12 @@ impl AgentAdapter for WorkBuddyAdapter {
             return Vec::new();
         };
 
-        let mut out: Vec<SessionSummary> = files
+        files
             .flatten()
             .map(|f| f.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
             .filter_map(|p| parse_session(&p, project_id))
-            .collect();
-
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        out
+            .collect()
     }
 }
 
@@ -156,7 +153,7 @@ fn first_text(v: &Value, want: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
+fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
     let file = open_readonly(path).ok()?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
     let reader = BufReader::with_capacity(256 * 1024, file);
@@ -169,7 +166,9 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
     let mut assistant_turns = 0usize;
     let mut tool_calls = 0usize;
     let mut models: BTreeSet<String> = BTreeSet::new();
-    let mut files: BTreeSet<String> = BTreeSet::new();
+    // path -> (版本号, 最后改动时间)。WorkBuddy 只有全量快照、没有 delta 记录，
+    // 所以改动次数只能取快照里的 version 最大值。
+    let mut files: BTreeMap<String, (usize, Option<i64>)> = BTreeMap::new();
     let mut cwd: Option<String> = None;
 
     for line in reader.lines().map_while(Result::ok) {
@@ -210,8 +209,15 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
                 if let Some(map) =
                     v.pointer("/snapshot/trackedFileBackups").and_then(Value::as_object)
                 {
-                    for k in map.keys() {
-                        files.insert(k.clone());
+                    // 记录本身带的 epoch 毫秒时间戳，快照内没有 per-file 时间
+                    let at = v.get("timestamp").and_then(Value::as_i64);
+                    for (k, meta) in map {
+                        let ver = meta.get("version").and_then(Value::as_u64).unwrap_or(1) as usize;
+                        let e = files.entry(k.clone()).or_insert((0, None));
+                        e.0 = e.0.max(ver);
+                        if let Some(at) = at {
+                            e.1 = Some(e.1.map_or(at, |c: i64| c.max(at)));
+                        }
                     }
                 }
             }
@@ -227,7 +233,12 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
     let last_write = mtime_ms(path).unwrap_or(0);
     let project_path = normalize_drive(&cwd.unwrap_or_else(|| decode_project_dir(project_id)));
 
-    Some(SessionSummary {
+    let touches: Vec<FileTouch> = files
+        .into_iter()
+        .map(|(path, (ver, at))| FileTouch { path, touches: ver.max(1), at })
+        .collect();
+
+    let summary = SessionSummary {
         agent: AgentKind::WorkBuddy,
         project_id: project_id.to_string(),
         project_path,
@@ -245,12 +256,14 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
         models: models.into_iter().collect(),
         // WorkBuddy 记录里没有 git 分支
         git_branch: None,
-        files_touched: files.len(),
+        files_touched: touches.len(),
         // WorkBuddy 不写 cost-state，这三项无数据
         lines_added: 0,
         lines_removed: 0,
         cost_usd: None,
         running: now_ms() - last_write < RUNNING_WINDOW_MS,
         bytes,
-    })
+    };
+
+    Some(ParsedSession { summary, files: touches })
 }

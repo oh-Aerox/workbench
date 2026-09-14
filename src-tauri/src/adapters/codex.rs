@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS};
-use crate::model::{AgentKind, ProjectSummary, SessionSummary};
+use crate::model::{AgentKind, ParsedSession, ProjectSummary, SessionSummary};
 use crate::paths::{agent_root, normalize_drive, open_readonly, project_display_name};
 
 use super::claude::mtime_ms;
@@ -154,16 +154,13 @@ impl AgentAdapter for CodexAdapter {
         out
     }
 
-    fn list_sessions(&self, project_id: &str) -> Vec<SessionSummary> {
+    fn parse_project(&self, project_id: &str) -> Vec<ParsedSession> {
         let names = thread_names();
-        let mut out: Vec<SessionSummary> = collect_rollouts()
+        collect_rollouts()
             .into_iter()
             .filter(|p| peek_cwd(p).as_deref() == Some(project_id))
             .filter_map(|p| parse_session(&p, project_id, &names))
-            .collect();
-
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        out
+            .collect()
     }
 }
 
@@ -171,7 +168,7 @@ fn parse_session(
     path: &Path,
     project_id: &str,
     names: &BTreeMap<String, String>,
-) -> Option<SessionSummary> {
+) -> Option<ParsedSession> {
     let file = open_readonly(path).ok()?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
     let reader = BufReader::with_capacity(256 * 1024, file);
@@ -247,7 +244,7 @@ fn parse_session(
 
     let last_write = mtime_ms(path).unwrap_or(0);
 
-    Some(SessionSummary {
+    let summary = SessionSummary {
         agent: AgentKind::Codex,
         project_id: project_id.to_string(),
         project_path: project_id.to_string(),
@@ -271,5 +268,8 @@ fn parse_session(
         cost_usd: None,
         running: now_ms() - last_write < RUNNING_WINDOW_MS,
         bytes,
-    })
+    };
+
+    // Codex 不做文件历史追踪，成果盘点的文件清单对它永远是空的
+    Some(ParsedSession { summary, files: Vec::new() })
 }

@@ -78,6 +78,62 @@ pub struct ProjectSummary {
     pub running: bool,
 }
 
+/// 一场会话里某个文件的改动情况。
+#[derive(Debug, Clone)]
+pub struct FileTouch {
+    pub path: String,
+    /// 本场会话里被改了几次
+    pub touches: usize,
+    /// 最后一次改动时间
+    pub at: Option<i64>,
+}
+
+/// 解析一场会话的完整产出。`SessionSummary` 是给列表用的压缩视图，
+/// `files` 保留逐文件明细，供项目级成果盘点聚合。
+#[derive(Debug, Clone)]
+pub struct ParsedSession {
+    pub summary: SessionSummary,
+    pub files: Vec<FileTouch>,
+}
+
+/// 成果盘点里的一个文件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOutcome {
+    pub path: String,
+    /// 相对项目根的路径，列表里显示这个
+    pub rel: String,
+    /// 被记录改动的次数
+    pub touches: usize,
+    /// 涉及多少场会话——跨会话反复改的文件是这个项目的热点
+    pub sessions: usize,
+    pub last_touched: Option<i64>,
+    /// 落在项目目录之外（如 ~/.claude/plans 下的计划文件），单独标记
+    pub outside: bool,
+}
+
+/// 项目级成果盘点：这个项目被改成了什么样。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectOutcome {
+    pub agent: AgentKind,
+    pub project_id: String,
+    pub project_path: String,
+    pub session_count: usize,
+    pub total_wall_ms: i64,
+    pub total_tool_calls: usize,
+    pub total_lines_added: i64,
+    pub total_lines_removed: i64,
+    /// 三家里只有 Claude 记花费，其余为 None
+    pub total_cost_usd: Option<f64>,
+    pub first_active: Option<i64>,
+    pub last_active: Option<i64>,
+    /// 按改动次数降序
+    pub files: Vec<FileOutcome>,
+    /// 按增删行数降序，用于「哪几场会话改动最大」
+    pub top_sessions: Vec<SessionSummary>,
+}
+
 /// 会话列表项。只读扫描得到，不含逐轮明细。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
