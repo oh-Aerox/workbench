@@ -6,14 +6,14 @@
 //!   ai-title                 Claude 自己生成的会话标题，直接拿来当卡片标题
 //!   cost-state               总花费、增删行数、各模型 token 用量
 //!   file-history-snapshot    file-history-delta  本次会话触达过的文件
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use super::{make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS};
-use crate::model::{AgentKind, ProjectSummary, SessionSummary};
+use crate::model::{AgentKind, FileTouch, ParsedSession, ProjectSummary, SessionSummary};
 use crate::paths::{
     agent_root, decode_project_dir, normalize_drive, open_readonly, project_display_name,
 };
@@ -140,7 +140,7 @@ impl AgentAdapter for ClaudeAdapter {
         out
     }
 
-    fn list_sessions(&self, project_id: &str) -> Vec<SessionSummary> {
+    fn parse_project(&self, project_id: &str) -> Vec<ParsedSession> {
         let Some(root) = projects_dir() else {
             return Vec::new();
         };
@@ -149,19 +149,43 @@ impl AgentAdapter for ClaudeAdapter {
             return Vec::new();
         };
 
-        let mut out: Vec<SessionSummary> = files
+        files
             .flatten()
             .map(|f| f.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
             .filter_map(|p| parse_session(&p, project_id))
-            .collect();
-
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        out
+            .collect()
     }
 }
 
-fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
+/// 累积某个文件的改动情况。
+#[derive(Default)]
+struct TouchAcc {
+    /// file-history-delta 记录数：每条对应一次真实改动
+    deltas: usize,
+    /// 快照里的 version：Claude 自己记的版本号，等于该文件被改过的次数
+    max_version: usize,
+    last_at: Option<i64>,
+}
+
+impl TouchAcc {
+    fn bump_at(&mut self, at: Option<i64>) {
+        if let Some(at) = at {
+            self.last_at = Some(self.last_at.map_or(at, |c: i64| c.max(at)));
+        }
+    }
+
+    /// 两个来源取大者。
+    ///
+    /// 不能简单相加：`file-history-snapshot` 里的 `trackedFileBackups` 是**全量**
+    /// 映射、每次快照重复出现，累加会把改动次数放大好几倍；而 delta 记录又可能
+    /// 因为会话中途开始追踪而少于真实次数。取 max 两边都不亏。
+    fn touches(&self) -> usize {
+        self.deltas.max(self.max_version).max(1)
+    }
+}
+
+fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
     let file = open_readonly(path).ok()?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
     let reader = BufReader::with_capacity(256 * 1024, file);
@@ -175,7 +199,7 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
     let mut assistant_turns = 0usize;
     let mut tool_calls = 0usize;
     let mut models: BTreeSet<String> = BTreeSet::new();
-    let mut files: BTreeSet<String> = BTreeSet::new();
+    let mut files: BTreeMap<String, TouchAcc> = BTreeMap::new();
     let mut git_branch: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut cost_usd: Option<f64> = None;
@@ -241,15 +265,24 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
             }
             Some("file-history-delta") => {
                 if let Some(p) = v.get("trackingPath").and_then(Value::as_str) {
-                    files.insert(p.to_string());
+                    let e = files.entry(p.to_string()).or_default();
+                    e.deltas += 1;
+                    e.bump_at(
+                        v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms),
+                    );
                 }
             }
             Some("file-history-snapshot") => {
                 if let Some(map) =
                     v.pointer("/snapshot/trackedFileBackups").and_then(Value::as_object)
                 {
-                    for k in map.keys() {
-                        files.insert(k.clone());
+                    for (k, meta) in map {
+                        let e = files.entry(k.clone()).or_default();
+                        let ver = meta.get("version").and_then(Value::as_u64).unwrap_or(1) as usize;
+                        e.max_version = e.max_version.max(ver);
+                        e.bump_at(
+                            meta.get("backupTime").and_then(Value::as_str).and_then(parse_iso_ms),
+                        );
                     }
                 }
             }
@@ -271,7 +304,12 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
     let last_write = mtime_ms(path).unwrap_or(0);
     let project_path = normalize_drive(&cwd.unwrap_or_else(|| decode_project_dir(project_id)));
 
-    Some(SessionSummary {
+    let touches: Vec<FileTouch> = files
+        .into_iter()
+        .map(|(path, acc)| FileTouch { path, touches: acc.touches(), at: acc.last_at })
+        .collect();
+
+    let summary = SessionSummary {
         agent: AgentKind::Claude,
         project_id: project_id.to_string(),
         project_path,
@@ -288,11 +326,13 @@ fn parse_session(path: &Path, project_id: &str) -> Option<SessionSummary> {
         tool_calls,
         models: models.into_iter().collect(),
         git_branch,
-        files_touched: files.len(),
+        files_touched: touches.len(),
         lines_added,
         lines_removed,
         cost_usd,
         running: now_ms() - last_write < RUNNING_WINDOW_MS,
         bytes,
-    })
+    };
+
+    Some(ParsedSession { summary, files: touches })
 }

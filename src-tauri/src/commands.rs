@@ -1,6 +1,6 @@
 //! 暴露给前端的命令。全部只读，没有任何一个命令能写 agent 目录。
 use crate::adapters::adapter_for;
-use crate::model::{AgentKind, AgentSummary, ProjectSummary, SessionSummary};
+use crate::model::{AgentKind, AgentSummary, ProjectOutcome, ProjectSummary, SessionSummary};
 use crate::paths::agent_root;
 
 /// 左侧 agent 栏。未安装的 agent 也返回（installed=false），前端置灰而不是消失，
@@ -43,4 +43,11 @@ pub fn list_projects(agent: String) -> Result<Vec<ProjectSummary>, String> {
 pub fn list_sessions(agent: String, project_id: String) -> Result<Vec<SessionSummary>, String> {
     let kind = AgentKind::from_id(&agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
     Ok(adapter_for(kind).list_sessions(&project_id))
+}
+
+/// 项目成果盘点：累计改了哪些文件、哪几场会话改动最大。
+#[tauri::command]
+pub fn project_outcome(agent: String, project_id: String) -> Result<ProjectOutcome, String> {
+    let kind = AgentKind::from_id(&agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
+    Ok(adapter_for(kind).project_outcome(&project_id))
 }
