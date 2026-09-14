@@ -3,11 +3,13 @@
   import SessionList from './SessionList.svelte'
   import AgentOverview from './AgentOverview.svelte'
   import SearchResults from './SearchResults.svelte'
+  import PlansView from './PlansView.svelte'
 
   let {
     agent,
     outcome,
     sessions,
+    plans,
     days,
     loading,
     loadingActivity,
@@ -31,6 +33,10 @@
     {#if mode === 'project'}
       <div class="tabs">
         <button class:on={tab === 'outcome'} onclick={() => (tab = 'outcome')}>成果</button>
+        <button class:on={tab === 'plans'} onclick={() => (tab = 'plans')}>
+          计划
+          {#if plans.length}<span class="n">{plans.length}</span>{/if}
+        </button>
         <button class:on={tab === 'sessions'} onclick={() => (tab = 'sessions')}>
           会话
           {#if sessions.length}<span class="n">{sessions.length}</span>{/if}
@@ -52,6 +58,8 @@
       <AgentOverview {agent} {days} loading={loadingActivity} />
     {:else if tab === 'outcome'}
       <OutcomeView {outcome} {loading} />
+    {:else if tab === 'plans'}
+      <PlansView {plans} {loading} {agent} />
     {:else}
       <SessionList {sessions} {loading} {hasProject} />
     {/if}

@@ -5,6 +5,7 @@
 //!   cargo run --example scan -- outcome  列每个项目的成果盘点（文件改动排行）
 //!   cargo run --example scan -- heat     按天活动量 + 缓存冷热对比
 //!   cargo run --example scan -- find 关键词   全局搜索
+//!   cargo run --example scan -- plans   列每个项目提取到的计划 / 待办
 //!
 //! 用来验证解析逻辑对本机真实数据是否正确，改完 adapter 先跑这个再开 GUI。
 use agent_workbench_lib::adapters::adapter_for;
@@ -18,6 +19,9 @@ fn main() {
 
     if args.iter().any(|a| a == "heat") {
         return heat();
+    }
+    if args.iter().any(|a| a == "plans") {
+        return plans();
     }
     if let Some(i) = args.iter().position(|a| a == "find") {
         return find(args.get(i + 1).map(String::as_str).unwrap_or(""));
@@ -149,4 +153,38 @@ fn find(q: &str) {
             h.snippet.replace('\n', " ")
         );
     }
+}
+
+
+/// 列出提取到的计划 / 待办。
+fn plans() {
+    let mut total = 0;
+    for kind in AgentKind::all() {
+        if agent_root(kind).map(|p| p.exists()) != Some(true) {
+            continue;
+        }
+        let adapter = adapter_for(kind);
+        for p in adapter.list_projects() {
+            let recs = adapter.project_plans(&p.id);
+            if recs.is_empty() {
+                continue;
+            }
+            total += recs.len();
+            println!("\n=== {} / {} ===", kind.display_name(), p.name);
+            for r in &recs {
+                println!(
+                    "  [{}] {}  （来源 {}，{} 条勾选项，正文 {} 字）",
+                    r.entry.kind,
+                    r.entry.title,
+                    r.entry.source,
+                    r.entry.items.len(),
+                    r.entry.body.as_ref().map(|b| b.chars().count()).unwrap_or(0)
+                );
+                for it in r.entry.items.iter().take(5) {
+                    println!("       [{}] {}", if it.status == "completed" { "x" } else { " " }, it.text);
+                }
+            }
+        }
+    }
+    println!("\n共提取到 {} 份计划 / 待办", total);
 }

@@ -5,6 +5,7 @@
     listProjects,
     listSessions,
     projectOutcome,
+    projectPlans,
     agentActivity,
     search as searchApi,
   } from './lib/api.js'
@@ -19,6 +20,7 @@
   let activeProjectName = $state('')
   let sessions = $state([])
   let outcome = $state(null)
+  let plans = $state([])
   let days = $state([])
   let loadingProjects = $state(false)
   let loadingSessions = $state(false)
@@ -40,6 +42,7 @@
       activeProjectName = ''
       sessions = []
       outcome = null
+      plans = []
     }
     projects = []
     days = []
@@ -67,15 +70,18 @@
     activeProjectName = project.path
     sessions = []
     outcome = null
+    plans = []
     loadingSessions = true
     try {
-      // 两个视图解析的是同一批 JSONL，一次并发取完，切 tab 就不用再等
-      const [o, s] = await Promise.all([
+      // 三个视图解析的是同一批 JSONL（缓存共用），一次并发取完，切 tab 不用再等
+      const [o, s, pl] = await Promise.all([
         projectOutcome(activeAgent, project.id),
         listSessions(activeAgent, project.id),
+        projectPlans(activeAgent, project.id),
       ])
       outcome = o
       sessions = s
+      plans = pl
     } catch (e) {
       error = String(e)
     } finally {
@@ -208,6 +214,7 @@
     agent={currentAgent}
     {outcome}
     {sessions}
+    {plans}
     {days}
     {hits}
     {query}

@@ -13,9 +13,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    cached_collect, local_day, make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS,
+    cached_collect, extract_checkboxes, local_day, make_title, markdown_title, now_ms,
+    parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS,
 };
-use crate::model::{AgentKind, FileTouch, ParsedSession, ProjectSummary, SessionSummary};
+use crate::model::{
+    AgentKind, FileTouch, ParsedSession, PlanEntry, ProjectSummary, SessionSummary, TodoItem,
+};
 use crate::paths::{
     agent_root, decode_project_dir, normalize_drive, open_readonly, project_display_name,
 };
@@ -161,6 +164,83 @@ impl AgentAdapter for ClaudeAdapter {
     }
 }
 
+/// 从一个 tool_use 块里提取计划 / 待办。
+///
+/// 两种来源：
+///   ExitPlanMode  input.plan 是计划 markdown 全文
+///   TodoWrite     input.todos 是 [{content, status, activeForm}] 结构化清单
+fn plan_from_tool(block: &Value, at: Option<i64>) -> Option<PlanEntry> {
+    let name = block.get("name").and_then(Value::as_str)?;
+    let input = block.get("input")?;
+
+    match name {
+        "ExitPlanMode" => {
+            let plan = input.get("plan").and_then(Value::as_str)?.trim();
+            if plan.is_empty() {
+                return None;
+            }
+            Some(PlanEntry {
+                at,
+                kind: "plan".into(),
+                title: markdown_title(plan).unwrap_or_else(|| "实施计划".into()),
+                items: extract_checkboxes(plan),
+                body: Some(plan.to_string()),
+                source: "ExitPlanMode".into(),
+            })
+        }
+        "TodoWrite" => {
+            let todos = input.get("todos")?.as_array()?;
+            let items: Vec<TodoItem> = todos
+                .iter()
+                .filter_map(|t| {
+                    let text = t
+                        .get("content")
+                        .or_else(|| t.get("activeForm"))
+                        .and_then(Value::as_str)?
+                        .trim();
+                    (!text.is_empty()).then(|| TodoItem {
+                        text: text.to_string(),
+                        status: t
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    })
+                })
+                .collect();
+            (!items.is_empty()).then(|| PlanEntry {
+                at,
+                kind: "todos".into(),
+                title: "任务清单".into(),
+                body: None,
+                items,
+                source: "TodoWrite".into(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// 读 ~/.claude/plans/<slug>.md。
+///
+/// 计划文件可能已被删除（Claude 会清理），读不到就跳过，不当错误。
+fn plan_from_file(slug: &str, at: Option<i64>) -> Option<PlanEntry> {
+    let path = agent_root(AgentKind::Claude)?.join("plans").join(format!("{slug}.md"));
+    let body = std::fs::read_to_string(&path).ok()?;
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    Some(PlanEntry {
+        at,
+        kind: "plan".into(),
+        title: markdown_title(body).unwrap_or_else(|| slug.to_string()),
+        items: extract_checkboxes(body),
+        body: Some(body.to_string()),
+        source: format!("plans/{slug}.md"),
+    })
+}
+
 /// 累积某个文件的改动情况。
 #[derive(Default)]
 struct TouchAcc {
@@ -209,6 +289,8 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
     let mut lines_added = 0i64;
     let mut lines_removed = 0i64;
     let mut daily: BTreeMap<String, u32> = BTreeMap::new();
+    let mut plans: Vec<PlanEntry> = Vec::new();
+    let mut slug: Option<String> = None;
 
     // 会话可能跨天（本机最长一场跨了 4 天多），活动量必须按事件时间逐条归到
     // 当天，不能用起止时间推算
@@ -242,6 +324,14 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(Value::as_str) {
                 cwd = Some(c.to_string());
+            }
+        }
+        // 会话关联的计划文件名（~/.claude/plans/<slug>.md）
+        if slug.is_none() {
+            if let Some(s) = v.get("slug").and_then(Value::as_str) {
+                if !s.is_empty() {
+                    slug = Some(s.to_string());
+                }
             }
         }
 
@@ -278,6 +368,15 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
                         .count();
                     tool_calls += n;
                     bump(&mut daily, ts, n as u32);
+
+                    for b in blocks {
+                        if b.get("type").and_then(Value::as_str) != Some("tool_use") {
+                            continue;
+                        }
+                        if let Some(p) = plan_from_tool(b, ts) {
+                            plans.push(p);
+                        }
+                    }
                 }
             }
             Some("file-history-delta") => {
@@ -326,6 +425,20 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         .map(|(path, acc)| FileTouch { path, touches: acc.touches(), at: acc.last_at })
         .collect();
 
+    // 计划文件是会话之外的独立产物：会话里没有 ExitPlanMode 记录时它仍可能存在，
+    // 但有记录时两者内容通常完全相同（ExitPlanMode 就是把这个文件提交上去的）。
+    // 按正文去重 —— 不能按 slug 比对 source，ExitPlanMode 的 source 里没有 slug。
+    if let Some(slug) = slug {
+        if let Some(p) = plan_from_file(&slug, ended_at) {
+            let dup = plans
+                .iter()
+                .any(|e| e.body.as_deref().map(str::trim) == p.body.as_deref().map(str::trim));
+            if !dup {
+                plans.push(p);
+            }
+        }
+    }
+
     let summary = SessionSummary {
         agent: AgentKind::Claude,
         project_id: project_id.to_string(),
@@ -351,5 +464,5 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         bytes,
     };
 
-    Some(ParsedSession { summary, files: touches, daily, first_prompt })
+    Some(ParsedSession { summary, files: touches, daily, first_prompt, plans })
 }

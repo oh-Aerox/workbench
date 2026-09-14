@@ -103,6 +103,46 @@ pub struct ParsedSession {
     pub daily: BTreeMap<String, u32>,
     /// 首条真人 prompt 原文，供全局搜索。标题是截断过的，搜不全。
     pub first_prompt: Option<String>,
+    /// 本场会话产出的计划 / 待办清单
+    #[serde(default)]
+    pub plans: Vec<PlanEntry>,
+}
+
+/// 待办清单里的一条。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoItem {
+    pub text: String,
+    /// pending / in_progress / completed / unknown
+    pub status: String,
+}
+
+/// 一份计划或待办清单，解析时从会话里提取，随 ParsedSession 一起进缓存。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEntry {
+    pub at: Option<i64>,
+    /// plan（计划全文）或 todos（结构化清单）
+    pub kind: String,
+    /// 取计划首个标题行；没有就用来源名
+    pub title: String,
+    /// 计划 markdown 全文，todos 类型为 None
+    pub body: Option<String>,
+    /// 勾选项或结构化待办条目
+    pub items: Vec<TodoItem>,
+    /// 来源标记，如 ExitPlanMode / TodoWrite / plans/xxx.md / update_plan
+    pub source: String,
+}
+
+/// 带上会话归属的计划，给前端用。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRecord {
+    pub agent: AgentKind,
+    pub session_id: String,
+    pub session_title: String,
+    #[serde(flatten)]
+    pub entry: PlanEntry,
 }
 
 /// 热力图的一格。

@@ -24,7 +24,9 @@ use serde_json::Value;
 use super::{
     cached_collect, local_day, make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS,
 };
-use crate::model::{AgentKind, ParsedSession, ProjectSummary, SessionSummary};
+use crate::model::{
+    AgentKind, ParsedSession, PlanEntry, ProjectSummary, SessionSummary, TodoItem,
+};
 use crate::paths::{agent_root, normalize_drive, open_readonly, project_display_name};
 
 use super::claude::mtime_ms;
@@ -186,6 +188,7 @@ fn parse_session(
     let mut tool_calls = 0usize;
     let mut models: BTreeSet<String> = BTreeSet::new();
     let mut daily: BTreeMap<String, u32> = BTreeMap::new();
+    let mut plans: Vec<PlanEntry> = Vec::new();
 
     fn bump(daily: &mut BTreeMap<String, u32>, ts: Option<i64>) {
         if let Some(day) = ts.and_then(local_day) {
@@ -224,6 +227,9 @@ fn parse_session(
                 if v.pointer("/payload/type").and_then(Value::as_str) == Some("function_call") {
                     tool_calls += 1;
                     bump(&mut daily, ts);
+                    if let Some(p) = plan_from_call(v.get("payload").unwrap_or(&Value::Null), ts) {
+                        plans.push(p);
+                    }
                 }
             }
             Some("event_msg") => match v.pointer("/payload/type").and_then(Value::as_str) {
@@ -288,5 +294,53 @@ fn parse_session(
     };
 
     // Codex 不做文件历史追踪，成果盘点的文件清单对它永远是空的
-    Some(ParsedSession { summary, files: Vec::new(), daily, first_prompt })
+    Some(ParsedSession { summary, files: Vec::new(), daily, first_prompt, plans })
+}
+
+/// 从 function_call 里提取 Codex 的计划（`update_plan` 工具）。
+///
+/// ⚠️ 本机的 Codex 会话里没有出现过这个工具，下面的字段形状是按 Codex 的
+/// 常见约定写的、**未经真实数据验证**。所以解析上刻意做得宽容：`plan` 数组
+/// 里的元素既接受 `{step, status}` 对象，也接受纯字符串；任何一环对不上就
+/// 安静返回 None，绝不让没见过的形状把整场会话的解析带崩。
+fn plan_from_call(payload: &Value, at: Option<i64>) -> Option<PlanEntry> {
+    if payload.get("name").and_then(Value::as_str) != Some("update_plan") {
+        return None;
+    }
+    // arguments 是被转义成字符串的 JSON
+    let raw = payload.get("arguments").and_then(Value::as_str)?;
+    let args: Value = serde_json::from_str(raw).ok()?;
+
+    let steps = args.get("plan").and_then(Value::as_array)?;
+    let items: Vec<TodoItem> = steps
+        .iter()
+        .filter_map(|s| {
+            let text = s
+                .as_str()
+                .or_else(|| s.get("step").and_then(Value::as_str))
+                .or_else(|| s.get("content").and_then(Value::as_str))?
+                .trim();
+            (!text.is_empty()).then(|| TodoItem {
+                text: text.to_string(),
+                status: s
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect();
+
+    (!items.is_empty()).then(|| PlanEntry {
+        at,
+        kind: "todos".into(),
+        title: args
+            .get("explanation")
+            .and_then(Value::as_str)
+            .map(|s| s.chars().take(50).collect())
+            .unwrap_or_else(|| "任务计划".into()),
+        body: None,
+        items,
+        source: "update_plan".into(),
+    })
 }
