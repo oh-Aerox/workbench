@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{make_title, now_ms, AgentAdapter, RUNNING_WINDOW_MS};
+use super::{cached_collect, local_day, make_title, now_ms, AgentAdapter, RUNNING_WINDOW_MS};
 use crate::model::{AgentKind, FileTouch, ParsedSession, ProjectSummary, SessionSummary};
 use crate::paths::{
     agent_root, decode_project_dir, normalize_drive, open_readonly, project_display_name,
@@ -134,12 +134,13 @@ impl AgentAdapter for WorkBuddyAdapter {
             return Vec::new();
         };
 
-        files
+        let paths: Vec<_> = files
             .flatten()
             .map(|f| f.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-            .filter_map(|p| parse_session(&p, project_id))
-            .collect()
+            .collect();
+
+        cached_collect(paths, |p| parse_session(p, project_id))
     }
 }
 
@@ -170,6 +171,13 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
     // 所以改动次数只能取快照里的 version 最大值。
     let mut files: BTreeMap<String, (usize, Option<i64>)> = BTreeMap::new();
     let mut cwd: Option<String> = None;
+    let mut daily: BTreeMap<String, u32> = BTreeMap::new();
+
+    fn bump(daily: &mut BTreeMap<String, u32>, ts: Option<i64>) {
+        if let Some(day) = ts.and_then(local_day) {
+            *daily.entry(day).or_insert(0) += 1;
+        }
+    }
 
     for line in reader.lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -180,7 +188,8 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         };
 
         // WorkBuddy 的时间戳是 epoch 毫秒数字，不是 ISO 字符串
-        if let Some(ts) = v.get("timestamp").and_then(Value::as_i64) {
+        let ts = v.get("timestamp").and_then(Value::as_i64);
+        if let Some(ts) = ts {
             started_at = Some(started_at.map_or(ts, |c: i64| c.min(ts)));
             ended_at = Some(ended_at.map_or(ts, |c: i64| c.max(ts)));
         }
@@ -197,14 +206,21 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
             Some("message") => match v.get("role").and_then(Value::as_str) {
                 Some("user") => {
                     user_turns += 1;
+                    bump(&mut daily, ts);
                     if first_prompt.is_none() {
                         first_prompt = first_text(&v, "input_text");
                     }
                 }
-                Some("assistant") => assistant_turns += 1,
+                Some("assistant") => {
+                    assistant_turns += 1;
+                    bump(&mut daily, ts);
+                }
                 _ => {}
             },
-            Some("function_call") => tool_calls += 1,
+            Some("function_call") => {
+                tool_calls += 1;
+                bump(&mut daily, ts);
+            }
             Some("file-history-snapshot") => {
                 if let Some(map) =
                     v.pointer("/snapshot/trackedFileBackups").and_then(Value::as_object)
@@ -265,5 +281,8 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         bytes,
     };
 
-    Some(ParsedSession { summary, files: touches })
+    // 存的是剥掉注入上下文后的真人输入，否则搜索会被 8KB 注入块淹没
+    let searchable = first_prompt.as_deref().map(super::strip_injected);
+
+    Some(ParsedSession { summary, files: touches, daily, first_prompt: searchable })
 }
