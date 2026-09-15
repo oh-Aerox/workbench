@@ -2,7 +2,7 @@
 
 本地 agent 工作进度可视化工作台。只读聚合 Claude Code、Codex、WorkBuddy 三家 agent 在本机留下的会话记录，按 agent → 项目 → 会话三级展示工作进度。
 
-需求原文见 [require.md](require.md)，未完成事项和已知限制见 [PLAN.md](PLAN.md)。
+未完成事项和已知限制见 [PLAN.md](PLAN.md)。
 
 ## 只读保证
 
