@@ -47,7 +47,9 @@ struct Store {
 /// 当前缓存格式版本。改动任何 adapter 的统计口径都要 +1。
 /// v2: ParsedSession 增加 plans 字段（计划 / 待办提取）
 /// v3: 增加 repo 映射（项目源码 TODO 扫描）
-const VERSION: u32 = 3;
+/// v4: decode_project_dir 在 unix 上改走 POSIX 还原（WorkBuddy 的 mac 目录名没有前导 `-`），
+///     缓存里的 ParsedSession.project_path 可能是旧的错误解码结果，必须重建
+const VERSION: u32 = 4;
 
 static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
 
