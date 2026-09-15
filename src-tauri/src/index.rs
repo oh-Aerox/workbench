@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::ParsedSession;
+use crate::model::{ParsedSession, RepoTodo};
 use crate::paths::{app_data_dir, assert_app_owned};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,17 +25,29 @@ struct Entry {
     parsed: ParsedSession,
 }
 
+/// 源码文件的扫描结果。TODO 标记通常为空，所以绝大多数条目只占一个空数组。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RepoEntry {
+    size: u64,
+    mtime: i64,
+    todos: Vec<RepoTodo>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Store {
     /// 缓存格式版本。解析逻辑一改，旧缓存的字段含义就可能不同，
     /// 版本对不上直接全部丢弃重建 —— 比留着可疑数据安全。
     version: u32,
     entries: HashMap<String, Entry>,
+    /// 项目源码文件 -> TODO 标记
+    #[serde(default)]
+    repo: HashMap<String, RepoEntry>,
 }
 
 /// 当前缓存格式版本。改动任何 adapter 的统计口径都要 +1。
 /// v2: ParsedSession 增加 plans 字段（计划 / 待办提取）
-const VERSION: u32 = 2;
+/// v3: 增加 repo 映射（项目源码 TODO 扫描）
+const VERSION: u32 = 3;
 
 static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
 
@@ -50,7 +62,7 @@ fn store() -> &'static Mutex<Store> {
             .and_then(|b| serde_json::from_slice::<Store>(&b).ok())
             .filter(|s| s.version == VERSION)
             .unwrap_or_default();
-        Mutex::new(Store { version: VERSION, entries: loaded.entries })
+        Mutex::new(Store { version: VERSION, entries: loaded.entries, repo: loaded.repo })
     })
 }
 
@@ -94,6 +106,37 @@ where
     Some(parsed)
 }
 
+/// 源码文件的 TODO 扫描缓存。同样按 (大小, mtime) 判断是否可复用。
+///
+/// `scan` 返回 None 表示这个文件不该被扫（二进制、超大），此时也记成空结果，
+/// 免得每次重扫都去读一遍同一个大文件。
+pub fn get_or_scan_file<F>(path: &Path, scan: F) -> Vec<RepoTodo>
+where
+    F: FnOnce() -> Option<Vec<RepoTodo>>,
+{
+    let key = path.to_string_lossy().to_string();
+    let fp = fingerprint(path);
+
+    if let Some((size, mtime)) = fp {
+        if let Ok(s) = store().lock() {
+            if let Some(e) = s.repo.get(&key) {
+                if e.size == size && e.mtime == mtime {
+                    return e.todos.clone();
+                }
+            }
+        }
+    }
+
+    let todos = scan().unwrap_or_default();
+
+    if let Some((size, mtime)) = fp {
+        if let Ok(mut s) = store().lock() {
+            s.repo.insert(key, RepoEntry { size, mtime, todos: todos.clone() });
+        }
+    }
+    todos
+}
+
 /// 落盘。解析完一批后调一次，不要每条都写。
 pub fn flush() {
     let Some(path) = cache_file() else { return };
@@ -115,6 +158,7 @@ pub fn flush() {
 pub fn clear() {
     if let Ok(mut s) = store().lock() {
         s.entries.clear();
+        s.repo.clear();
     }
     if let Some(path) = cache_file() {
         assert_app_owned(&path);
