@@ -6,6 +6,7 @@
     listSessions,
     projectOutcome,
     projectPlans,
+    projectDocs,
     projectTodos,
     agentActivity,
     search as searchApi,
@@ -84,15 +85,22 @@
     repoError = null
     loadingSessions = true
     try {
-      // 三个视图解析的是同一批 JSONL（缓存共用），一次并发取完，切 tab 不用再等
-      const [o, s, pl] = await Promise.all([
+      // 前三个解析的是同一批 JSONL（缓存共用），第四个只走两层目录找计划文档，
+      // 都很快，一次并发取完，切 tab 不用再等
+      const [o, s, agentPlans, docs] = await Promise.all([
         projectOutcome(activeAgent, project.id),
         listSessions(activeAgent, project.id),
         projectPlans(activeAgent, project.id),
+        projectDocs(project.path).catch(() => []),
       ])
       outcome = o
       sessions = s
-      plans = pl
+      // 项目里的 PLAN.md 是「当前还要做什么」，agent 计划是「当时打算怎么做」，
+      // 前者更有现时意义，排前面
+      plans = [
+        ...docs.map((d) => ({ ...d, sessionTitle: null, sessionId: `doc:${d.source}` })),
+        ...agentPlans,
+      ]
     } catch (e) {
       error = String(e)
     } finally {

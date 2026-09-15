@@ -1,4 +1,11 @@
-//! 扫描项目工作目录里的 TODO 标记和待办文档。
+//! 扫描项目工作目录里的计划文档和 TODO 标记。
+//!
+//! 两个入口，快慢分明，**刻意不合并**：
+//!   `scan_docs`    只找 PLAN.md / TODO.md 这类计划文档，走两层目录，毫秒级，
+//!                  可在切项目时自动加载
+//!   `scan_project` 遍历整棵源码树找 TODO 标记，本机最大项目 7162 文件、85 秒，
+//!                  只能按钮触发
+//! 合并的话，看一眼 PLAN.md 就得先等一分半钟。
 //!
 //! **这是本应用唯一读取 agent 数据目录之外文件的地方**。仍然是只读——用
 //! `paths::open_readonly`，且路径必须先通过 `commands` 里的白名单校验（只允许
@@ -11,8 +18,8 @@
 //! 再配合 `index` 里按 (大小, mtime) 的逐文件缓存，重复扫描只读变化过的文件。
 use std::path::{Path, PathBuf};
 
-use crate::adapters::extract_checkboxes;
-use crate::model::{RepoTodo, RepoTodoDoc, RepoTodoReport};
+use crate::adapters::{extract_checkboxes, markdown_title};
+use crate::model::{PlanEntry, RepoTodo, RepoTodoReport};
 use crate::paths::open_readonly;
 
 /// 依赖目录和构建产物，扫了纯属浪费。
@@ -63,16 +70,86 @@ fn is_ignored_dir(name: &str) -> bool {
     IGNORE_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name))
 }
 
-/// 文件名像不像待办文档。
+/// 文件名像不像计划 / 待办文档。
 fn is_todo_doc(name: &str) -> bool {
     let lower = name.to_lowercase();
     if !lower.ends_with(".md") && !lower.ends_with(".txt") {
         return false;
     }
     let stem = lower.trim_end_matches(".md").trim_end_matches(".txt");
-    matches!(stem, "todo" | "todos" | "roadmap" | "plan" | "plans" | "backlog")
-        || stem.contains("待办")
+    matches!(
+        stem,
+        "todo" | "todos" | "roadmap" | "plan" | "plans" | "backlog" | "tasks" | "milestones"
+    ) || stem.contains("待办")
         || stem.contains("计划")
+        || stem.contains("路线")
+}
+
+/// 正文超过这个长度就截断：计划文档正常不会这么长，
+/// 超长的多半是被误判的大文档。
+const MAX_DOC_CHARS: usize = 40_000;
+
+/// 只找计划 / 待办文档，不做全文件扫描。
+///
+/// 和 `scan_project` 分开是关键：找文档只需走两层目录、命中几个文件，
+/// 毫秒级就能完成，可以在切项目时自动加载；而扫 TODO 标记要遍历整棵源码树
+/// （本机最大的项目 7162 个文件、85 秒），只能按钮触发。
+/// 把两者绑在一起，就等于要等一分半钟才能看到 PLAN.md。
+pub fn scan_docs(root: &Path) -> Vec<PlanEntry> {
+    let mut out = Vec::new();
+    if !root.is_dir() {
+        return out;
+    }
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            if ft.is_dir() {
+                if depth + 1 < DOC_MAX_DEPTH && !is_ignored_dir(&name) && !name.starts_with('.') {
+                    stack.push((entry.path(), depth + 1));
+                }
+                continue;
+            }
+            if !ft.is_file() || !is_todo_doc(&name) {
+                continue;
+            }
+
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            let Some(content) = read_text(&path, meta.len()) else { continue };
+            let content = content.trim();
+            if content.is_empty() {
+                continue;
+            }
+
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| name.clone());
+            let at = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+
+            out.push(PlanEntry {
+                at,
+                kind: "doc".into(),
+                title: markdown_title(content).unwrap_or_else(|| name.clone()),
+                items: extract_checkboxes(content),
+                body: Some(content.chars().take(MAX_DOC_CHARS).collect()),
+                source: rel,
+            });
+        }
+    }
+
+    // 勾选项多的排前面：有清单的文档比纯说明文档更像「待办」
+    out.sort_by(|a, b| b.items.len().cmp(&a.items.len()).then(b.at.cmp(&a.at)));
+    out
 }
 
 /// 读文本文件；二进制和超大文件返回 None。
@@ -133,7 +210,6 @@ pub fn scan_project(root: &Path) -> RepoTodoReport {
         root: root.display().to_string(),
         exists: root.is_dir(),
         todos: Vec::new(),
-        docs: Vec::new(),
         files_scanned: 0,
         truncated: false,
         elapsed_ms: 0,
@@ -143,9 +219,9 @@ pub fn scan_project(root: &Path) -> RepoTodoReport {
     }
 
     // 显式栈做广度遍历，不用递归——深层目录递归有爆栈风险
-    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
 
-    while let Some((dir, depth)) = stack.pop() {
+    while let Some(dir) = stack.pop() {
         if report.files_scanned >= MAX_FILES || report.todos.len() >= MAX_TODOS {
             report.truncated = true;
             break;
@@ -163,7 +239,7 @@ pub fn scan_project(root: &Path) -> RepoTodoReport {
                 if is_ignored_dir(&name) || name.starts_with('.') {
                     continue;
                 }
-                stack.push((path, depth + 1));
+                stack.push(path);
                 continue;
             }
             if !ft.is_file() {
@@ -175,19 +251,6 @@ pub fn scan_project(root: &Path) -> RepoTodoReport {
                 .strip_prefix(root)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| name.clone());
-
-            // 待办文档：整份读进来抽勾选框
-            if depth < DOC_MAX_DEPTH && is_todo_doc(&name) {
-                if let Some(content) = read_text(&path, meta.len()) {
-                    let items = extract_checkboxes(&content);
-                    report.docs.push(RepoTodoDoc {
-                        file: rel.clone(),
-                        total: items.len(),
-                        done: items.iter().filter(|t| t.status == "completed").count(),
-                        items: items.into_iter().take(200).collect(),
-                    });
-                }
-            }
 
             report.files_scanned += 1;
             let mut found = crate::index::get_or_scan_file(&path, || {
@@ -204,7 +267,6 @@ pub fn scan_project(root: &Path) -> RepoTodoReport {
 
     report.todos.truncate(MAX_TODOS);
     report.todos.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
-    report.docs.sort_by(|a, b| b.total.cmp(&a.total));
     crate::index::flush();
     report.elapsed_ms = started.elapsed().as_millis() as u64;
     report
@@ -242,13 +304,27 @@ mod tests {
     }
 
     #[test]
-    fn 待办文档识别() {
+    fn 计划文档识别() {
+        assert!(is_todo_doc("PLAN.md"), "本项目自己的 PLAN.md 必须认得");
         assert!(is_todo_doc("TODO.md"));
         assert!(is_todo_doc("todos.txt"));
         assert!(is_todo_doc("ROADMAP.md"));
         assert!(is_todo_doc("待办事项.md"));
-        assert!(!is_todo_doc("README.md"));
+        assert!(is_todo_doc("开发计划.md"));
+        assert!(!is_todo_doc("README.md"), "README 是说明不是计划");
         assert!(!is_todo_doc("todo.rs"), "只认 md 和 txt");
+    }
+
+    #[test]
+    fn 计划文档能抽出勾选进度() {
+        // scan_docs 对本仓库自己跑一遍：PLAN.md 就在根目录
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let docs = scan_docs(root);
+        let plan = docs.iter().find(|d| d.source.contains("PLAN.md"));
+        let plan = plan.expect("本仓库根目录应有 PLAN.md");
+        assert_eq!(plan.kind, "doc");
+        assert!(plan.body.is_some(), "计划文档要带正文供渲染");
+        assert!(!plan.items.is_empty(), "PLAN.md 里有勾选框，应被抽出");
     }
 
     #[test]

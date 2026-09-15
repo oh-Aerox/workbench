@@ -31,7 +31,7 @@
 
 <section class="repo">
   <h3>
-    源码待办
+    代码里的 TODO 标记
     {#if report?.todos?.length}<span class="n">{report.todos.length}</span>{/if}
     <button class="scan" onclick={onscan} disabled={scanning}>
       {scanning ? '扫描中…' : report ? '重新扫描' : '扫描源码'}
@@ -44,10 +44,12 @@
     <p class="note">正在遍历项目源码…大项目首次扫描可能要几十秒，之后走缓存会快很多。</p>
   {:else if !report}
     <p class="note">
-      扫描项目工作目录里的 <code>TODO</code> / <code>FIXME</code> / <code>XXX</code> /
-      <code>HACK</code> 标记和 <code>TODO.md</code> 类文档。
+      遍历整棵源码树，找出代码注释里的 <code>TODO</code> / <code>FIXME</code> /
+      <code>XXX</code> / <code>HACK</code> 标记。
       <br />
-      这会读取项目源码（仍然只读），与上方「agent 计划」的数据来源不同，所以做成手动触发。
+      计划文档（<code>PLAN.md</code> 等）不在这里，已经自动加载到上方列表了 ——
+      那个只需走两层目录、毫秒级；这个要遍历全部文件，大项目首次可能几十秒，
+      所以做成手动触发。
     </p>
   {:else if !report.exists}
     <p class="note">项目目录已不存在：<code>{report.root}</code></p>
@@ -60,18 +62,6 @@
 
     {#if report.truncated}
       <p class="warn">结果已截断：触到遍历或命中上限，下面不是全部。</p>
-    {/if}
-
-    {#if report.docs.length}
-      <div class="docs">
-        {#each report.docs as d}
-          <div class="doc">
-            <span class="dfile">{d.file}</span>
-            <span class="dprog">{d.done}/{d.total}</span>
-            <div class="dbar"><i style="width: {d.total ? (d.done / d.total) * 100 : 0}%"></i></div>
-          </div>
-        {/each}
-      </div>
     {/if}
 
     {#if !report.todos.length}
@@ -150,13 +140,6 @@
   .meta { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--dim); margin-bottom: 10px; }
   .meta b { color: var(--text); }
   .mk { color: var(--dimmer); }
-
-  .docs { margin-bottom: 12px; }
-  .doc { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 12px; }
-  .dfile { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dprog { font-size: 10px; color: var(--ok); }
-  .dbar { width: 70px; height: 3px; background: var(--panel-2); border-radius: 2px; flex-shrink: 0; }
-  .dbar i { display: block; height: 100%; background: var(--ok); border-radius: 2px; }
 
   ul { list-style: none; margin: 0; padding: 0; }
 

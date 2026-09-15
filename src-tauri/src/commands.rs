@@ -1,7 +1,7 @@
 //! 暴露给前端的命令。全部只读，没有任何一个命令能写 agent 目录。
 use crate::adapters::adapter_for;
 use crate::model::{
-    AgentKind, AgentSummary, DayActivity, PlanRecord, ProjectOutcome, ProjectSummary,
+    AgentKind, AgentSummary, DayActivity, PlanEntry, PlanRecord, ProjectOutcome, ProjectSummary,
     RepoTodoReport, SearchHit, SessionSummary,
 };
 use crate::paths::agent_root;
@@ -74,22 +74,38 @@ pub fn project_plans(agent: String, project_id: String) -> Result<Vec<PlanRecord
 #[tauri::command]
 pub async fn project_todos(project_path: String) -> Result<RepoTodoReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let target = project_path.to_lowercase();
-        let known = AgentKind::all().into_iter().any(|kind| {
-            agent_root(kind).map(|p| p.exists()) == Some(true)
-                && adapter_for(kind)
-                    .list_projects()
-                    .iter()
-                    .any(|p| p.path.to_lowercase() == target)
-        });
-
-        if !known {
-            return Err(format!("拒绝扫描：{project_path} 不在任何 agent 的项目列表里"));
-        }
+        ensure_known_project(&project_path)?;
         Ok(repo::scan_project(std::path::Path::new(&project_path)))
     })
     .await
     .map_err(|e| format!("扫描任务失败: {e}"))?
+}
+
+/// 白名单校验：目标必须确实是某个 agent 记录过的项目目录。
+fn ensure_known_project(project_path: &str) -> Result<(), String> {
+    let target = project_path.to_lowercase();
+    let known = AgentKind::all().into_iter().any(|kind| {
+        agent_root(kind).map(|p| p.exists()) == Some(true)
+            && adapter_for(kind)
+                .list_projects()
+                .iter()
+                .any(|p| p.path.to_lowercase() == target)
+    });
+    if known {
+        Ok(())
+    } else {
+        Err(format!("拒绝扫描：{project_path} 不在任何 agent 的项目列表里"))
+    }
+}
+
+/// 项目里的计划文档（PLAN.md / TODO.md / ROADMAP.md 之类）。
+///
+/// 与 `project_todos` 分开：找文档只走两层目录、毫秒级，所以可以在切项目时
+/// 自动加载；扫 TODO 标记要遍历整棵源码树、几十秒，必须按钮触发。
+#[tauri::command]
+pub fn project_docs(project_path: String) -> Result<Vec<PlanEntry>, String> {
+    ensure_known_project(&project_path)?;
+    Ok(repo::scan_docs(std::path::Path::new(&project_path)))
 }
 
 /// 该 agent 的按天活动量，供热力图。首次调用会全量解析，之后走缓存。

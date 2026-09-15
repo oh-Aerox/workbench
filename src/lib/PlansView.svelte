@@ -24,12 +24,14 @@
 {:else}
 {#if !plans.length}
   <div class="empty">
-    <p class="lead">该项目没有 agent 计划记录</p>
-    <p>这一栏读的是 agent 自己产出的计划，来源：</p>
+    <p class="lead">没有找到计划</p>
+    <p>这一栏合并了两类来源：</p>
     <ul>
-      <li><b>Claude Code</b> — 计划模式（<code>ExitPlanMode</code>）产出的实施计划、<code>TodoWrite</code> 任务清单、<code>~/.claude/plans/*.md</code></li>
-      <li><b>Codex</b> — <code>update_plan</code> 工具的步骤清单</li>
-      <li><b>WorkBuddy</b> — 暂无，它的工具集里还没有计划/待办类工具</li>
+      <li><b>项目里的计划文档</b> — 根目录及下一层的 <code>PLAN.md</code> /
+        <code>TODO.md</code> / <code>ROADMAP.md</code> / <code>待办*.md</code> 等，自动加载</li>
+      <li><b>agent 产出的计划</b> — Claude 计划模式（<code>ExitPlanMode</code>）、
+        <code>TodoWrite</code> 清单、<code>~/.claude/plans/*.md</code>；Codex 的
+        <code>update_plan</code>。WorkBuddy 的工具集里还没有计划类工具</li>
     </ul>
     <p class="tip">
       {#if agent?.id === 'workbuddy'}
@@ -51,7 +53,7 @@
           {#if p.items.length}
             <span class="progress">{done(p.items)}/{p.items.length}</span>
           {/if}
-          <span class="src">{p.source}</span>
+          <span class="src" class:doc={p.kind === 'doc'}>{p.source}</span>
           <span class="when">{relTime(p.at)}</span>
         </button>
 
@@ -74,7 +76,11 @@
             {:else if p.body}
               <Markdown source={p.body} />
             {/if}
-            <p class="from">来自会话「{p.sessionTitle}」</p>
+            {#if p.sessionTitle}
+              <p class="from">来自会话「{p.sessionTitle}」</p>
+            {:else}
+              <p class="from">来自项目文件 {p.source}</p>
+            {/if}
           </div>
         {/if}
       </article>
@@ -145,6 +151,7 @@
     padding: 0 4px;
     flex-shrink: 0;
   }
+  .src.doc { color: var(--accent); }
   .src {
     margin-left: auto;
     font-size: 10px;

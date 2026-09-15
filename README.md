@@ -56,9 +56,23 @@
 
 ## 计划 / 待办从哪来
 
-「计划」面板有两套互不相干的来源，分区展示：
+「计划」面板合并三类来源，**按快慢分成自动加载与手动触发两档**：
 
-### 一、agent 自己产出的计划（自动加载）
+| 来源 | 加载方式 | 耗时 |
+|---|---|---|
+| 项目里的计划文档（`PLAN.md` 等） | 切项目自动 | 毫秒级，只走两层目录 |
+| agent 产出的计划（`ExitPlanMode` 等） | 切项目自动 | 走会话解析缓存 |
+| 代码注释里的 TODO 标记 | 按钮触发 | 大项目首次几十秒 |
+
+分档是必须的：本机最大的项目扫一遍源码树要 85 秒，若和计划文档绑在一起，看一眼 `PLAN.md` 就得等一分半钟。
+
+### 一、项目里的计划文档（自动加载）
+
+根目录及下一层里名为 `PLAN` / `TODO` / `ROADMAP` / `BACKLOG` / `TASKS` / `MILESTONES` 的 `.md`、`.txt`，以及名字含「待办」「计划」「路线」的文档。整份读进来渲染，并抽出 `- [ ]` 勾选项算完成度。
+
+`README.md` 不算——它是说明不是计划。
+
+### 二、agent 自己产出的计划（自动加载）
 
 | 来源 | 说明 |
 |---|---|
@@ -73,9 +87,9 @@
 - **只认真正的复选框** `- [ ]` / `- [x]`。计划正文里的普通 `-` 列表大多是选型说明和约束条件，当成待办会满屏噪声
 - **按正文去重**。`ExitPlanMode` 和 `plans/<slug>.md` 通常是同一份内容（前者就是把后者提交上去的），不能按 slug 比对 `source`——`ExitPlanMode` 的 source 里没有 slug
 
-### 二、项目源码里的 TODO 标记（手动触发）
+### 三、代码注释里的 TODO 标记（手动触发）
 
-扫 `TODO` / `FIXME` / `XXX` / `HACK` 标记和 `TODO.md` 类文档（见 `repo.rs`）。
+遍历整棵源码树找 `TODO` / `FIXME` / `XXX` / `HACK`（见 `repo.rs` 的 `scan_project`）。
 
 **这是本应用唯一读取 agent 数据目录之外文件的功能**，仍然只读，但读取范围扩大到了项目源码树，所以有三道约束：
 
@@ -173,7 +187,7 @@ src/                       Svelte 5 前端，无 UI 库、无图表库（热力�
   lib/Heatmap.svelte       近 26 周日历热力图
   lib/OutcomeView.svelte   成果盘点：文件改动排行 + 会话贡献排行
   lib/PlansView.svelte     计划 / 待办清单
-  lib/RepoTodos.svelte     源码 TODO 分区（手动触发扫描）
+  lib/RepoTodos.svelte     代码 TODO 标记分区（手动触发扫描）
   lib/Markdown.svelte      极简 markdown 渲染（不引库、不用 @html）
   lib/SessionList.svelte   按时间倒序的会话卡片
   lib/SearchResults.svelte 搜索结果 + 关键词高亮
@@ -182,7 +196,7 @@ src-tauri/
   src/paths.rs             路径解析 + 只读守卫（含单测）
   src/index.rs             增量解析缓存（唯一写磁盘处）
   src/watcher.rs           agent 目录监听，去抖后通知前端
-  src/repo.rs              项目源码 TODO 扫描（唯一读 agent 目录之外文件处）
+  src/repo.rs              计划文档发现 + 源码 TODO 扫描（唯一读 agent 目录之外文件处）
   src/commands.rs          暴露给前端的只读命令
   src/adapters/            每家 agent 一个实现 + 聚合逻辑
   examples/scan.rs         命令行冒烟检查，不起窗口
