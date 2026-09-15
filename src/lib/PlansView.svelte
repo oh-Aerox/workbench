@@ -1,8 +1,9 @@
 <script>
   import Markdown from './Markdown.svelte'
+  import RepoTodos from './RepoTodos.svelte'
   import { relTime } from './format.js'
 
-  let { plans, loading, agent } = $props()
+  let { plans, loading, agent, repoReport, repoScanning, repoError, onscan } = $props()
 
   // 默认展开最新一份，其余折叠
   let open = $state(new Set([0]))
@@ -20,14 +21,17 @@
 
 {#if loading}
   <div class="hint">提取中…</div>
-{:else if !plans.length}
+{:else}
+{#if !plans.length}
   <div class="empty">
-    <p class="lead">没有提取到计划或待办</p>
-    <p>工作台只从 agent 自己的记录里读，不扫描项目源码。目前支持的来源：</p>
+    <p class="lead">没有找到计划</p>
+    <p>这一栏合并了两类来源：</p>
     <ul>
-      <li><b>Claude Code</b> — 计划模式（<code>ExitPlanMode</code>）产出的实施计划、<code>TodoWrite</code> 任务清单、<code>~/.claude/plans/*.md</code></li>
-      <li><b>Codex</b> — <code>update_plan</code> 工具的步骤清单</li>
-      <li><b>WorkBuddy</b> — 暂无，它的工具集里还没有计划/待办类工具</li>
+      <li><b>项目里的计划文档</b> — 根目录及下一层的 <code>PLAN.md</code> /
+        <code>TODO.md</code> / <code>ROADMAP.md</code> / <code>待办*.md</code> 等，自动加载</li>
+      <li><b>agent 产出的计划</b> — Claude 计划模式（<code>ExitPlanMode</code>）、
+        <code>TodoWrite</code> 清单、<code>~/.claude/plans/*.md</code>；Codex 的
+        <code>update_plan</code>。WorkBuddy 的工具集里还没有计划类工具</li>
     </ul>
     <p class="tip">
       {#if agent?.id === 'workbuddy'}
@@ -35,6 +39,7 @@
       {:else}
         该项目还没用过计划模式。用 Claude Code 的计划模式做一次规划，这里就会出现。
       {/if}
+      项目源码里的 TODO 标记是另一套来源，见下方。
     </p>
   </div>
 {:else}
@@ -48,7 +53,7 @@
           {#if p.items.length}
             <span class="progress">{done(p.items)}/{p.items.length}</span>
           {/if}
-          <span class="src">{p.source}</span>
+          <span class="src" class:doc={p.kind === 'doc'}>{p.source}</span>
           <span class="when">{relTime(p.at)}</span>
         </button>
 
@@ -71,12 +76,19 @@
             {:else if p.body}
               <Markdown source={p.body} />
             {/if}
-            <p class="from">来自会话「{p.sessionTitle}」</p>
+            {#if p.sessionTitle}
+              <p class="from">来自会话「{p.sessionTitle}」</p>
+            {:else}
+              <p class="from">来自项目文件 {p.source}</p>
+            {/if}
           </div>
         {/if}
       </article>
     {/each}
   </div>
+{/if}
+
+<RepoTodos report={repoReport} scanning={repoScanning} error={repoError} {onscan} />
 {/if}
 
 <style>
@@ -139,6 +151,7 @@
     padding: 0 4px;
     flex-shrink: 0;
   }
+  .src.doc { color: var(--accent); }
   .src {
     margin-left: auto;
     font-size: 10px;

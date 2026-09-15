@@ -2,6 +2,8 @@
 
 本地 agent 工作进度可视化工作台。只读聚合 Claude Code、Codex、WorkBuddy 三家 agent 在本机留下的会话记录，按 agent → 项目 → 会话三级展示工作进度。
 
+需求原文见 [require.md](require.md)，未完成事项和已知限制见 [PLAN.md](PLAN.md)。
+
 ## 只读保证
 
 本应用**绝不写入任何 agent 工作区**。三层保证：
@@ -16,6 +18,8 @@
 - macOS `~/Library/Application Support/AgentWorkbench/parse-cache.json`
 
 文件监听（`watcher.rs`）只订阅文件系统事件，不读也不写被监听的文件；真正的重新解析发生在前端收到通知后主动重新调命令时，届时仍走 `open_readonly`。
+
+⚠️ **读取范围有一个例外**：源码 TODO 扫描（`repo.rs`）会读项目工作目录下的文件。仍然只读、不违反需求 2，但它超出了三个 agent 数据目录，所以受白名单和手动触发两道约束——详见下方「项目源码里的 TODO 标记」。
 
 ## 增量缓存
 
@@ -52,7 +56,23 @@
 
 ## 计划 / 待办从哪来
 
-只从 agent 自己的记录里读，**不扫描项目源码**——那会把应用的读取范围从三个 agent 数据目录扩大到用户全部项目的源码树。
+「计划」面板合并三类来源，**按快慢分成自动加载与手动触发两档**：
+
+| 来源 | 加载方式 | 耗时 |
+|---|---|---|
+| 项目里的计划文档（`PLAN.md` 等） | 切项目自动 | 毫秒级，只走两层目录 |
+| agent 产出的计划（`ExitPlanMode` 等） | 切项目自动 | 走会话解析缓存 |
+| 代码注释里的 TODO 标记 | 按钮触发 | 大项目首次几十秒 |
+
+分档是必须的：本机最大的项目扫一遍源码树要 85 秒，若和计划文档绑在一起，看一眼 `PLAN.md` 就得等一分半钟。
+
+### 一、项目里的计划文档（自动加载）
+
+根目录及下一层里名为 `PLAN` / `TODO` / `ROADMAP` / `BACKLOG` / `TASKS` / `MILESTONES` 的 `.md`、`.txt`，以及名字含「待办」「计划」「路线」的文档。整份读进来渲染，并抽出 `- [ ]` 勾选项算完成度。
+
+`README.md` 不算——它是说明不是计划。
+
+### 二、agent 自己产出的计划（自动加载）
 
 | 来源 | 说明 |
 |---|---|
@@ -66,6 +86,27 @@
 
 - **只认真正的复选框** `- [ ]` / `- [x]`。计划正文里的普通 `-` 列表大多是选型说明和约束条件，当成待办会满屏噪声
 - **按正文去重**。`ExitPlanMode` 和 `plans/<slug>.md` 通常是同一份内容（前者就是把后者提交上去的），不能按 slug 比对 `source`——`ExitPlanMode` 的 source 里没有 slug
+
+### 三、代码注释里的 TODO 标记（手动触发）
+
+遍历整棵源码树找 `TODO` / `FIXME` / `XXX` / `HACK`（见 `repo.rs` 的 `scan_project`）。
+
+**这是本应用唯一读取 agent 数据目录之外文件的功能**，仍然只读，但读取范围扩大到了项目源码树，所以有三道约束：
+
+1. **白名单**：`project_todos` 命令只接受出现在某个 agent 项目列表里的路径。前端传来的路径不可信——没有这道校验，任何能调到该命令的地方都能让应用遍历机器上任意目录
+2. **手动触发**：本机 eshop 项目 7162 个文件首次扫描耗时 **85 秒**（绝大部分花在逐文件读取上，Windows Defender 实时扫描会显著放大）。切项目就自动扫会像卡死，所以做成按钮
+3. **跑在阻塞线程池**：命令是 `async` + `spawn_blocking`，不占 UI 线程
+
+性能闸门：忽略 `node_modules`/`target`/`dist` 等依赖与构建产物目录及所有隐藏目录、跳过 >512 KB 和含 NUL 字节的文件、遍历 6 万文件或命中 3000 条即截断。配合按 (大小, mtime) 的逐文件缓存，重扫只读变化过的文件（eshop 85s → 1.2s）。
+
+代价是缓存文件会变大：**每个扫过的文件都要存一条记录，包括没有 TODO 的**。本机扫完全部项目后 `parse-cache.json` 从 46 KB 涨到 1.5 MB。这笔开销省不掉——不存空结果，下次重扫就得重读全部文件，等于回到 85 秒。
+
+匹配规则上的两个决定：
+
+- **要求标记是独立单词**，前后不能紧邻字母数字。否则 `TODOS_TABLE`、`XXXX` 会误判——本机 eshop 上这条规则滤掉了 56 处误报（352 → 296）
+- **大小写敏感**，只认全大写。小写 `todo` 在正常英文散文里太常见，不敏感会被噪声淹没
+
+⚠️ 噪声仍然存在且无法根治：eshop 的 296 处里有 102 处来自 `inc/class/phpQuery/phpQuery.php` 这个内嵌的第三方库。它不在 `vendor/` 之类的常规目录名下，靠目录名规则识别不出来。
 
 Codex 没有文件历史追踪，成果盘点对它的文件清单永远是空的；WorkBuddy 只有全量快照没有增量记录，改动次数只能取快照里的 `version`。
 
@@ -99,6 +140,7 @@ cargo run --example scan -- outcome  # 列每个项目的成果盘点
 cargo run --example scan -- heat     # 按天活动量 + 缓存冷热耗时对比
 cargo run --example scan -- find xxx # 全局搜索
 cargo run --example scan -- plans    # 列提取到的计划 / 待办
+cargo run --example scan -- todos    # 扫项目源码的 TODO 标记（含冷热耗时）
 ```
 
 出包：
@@ -145,6 +187,7 @@ src/                       Svelte 5 前端，无 UI 库、无图表库（热力�
   lib/Heatmap.svelte       近 26 周日历热力图
   lib/OutcomeView.svelte   成果盘点：文件改动排行 + 会话贡献排行
   lib/PlansView.svelte     计划 / 待办清单
+  lib/RepoTodos.svelte     代码 TODO 标记分区（手动触发扫描）
   lib/Markdown.svelte      极简 markdown 渲染（不引库、不用 @html）
   lib/SessionList.svelte   按时间倒序的会话卡片
   lib/SearchResults.svelte 搜索结果 + 关键词高亮
@@ -153,6 +196,7 @@ src-tauri/
   src/paths.rs             路径解析 + 只读守卫（含单测）
   src/index.rs             增量解析缓存（唯一写磁盘处）
   src/watcher.rs           agent 目录监听，去抖后通知前端
+  src/repo.rs              计划文档发现 + 源码 TODO 扫描（唯一读 agent 目录之外文件处）
   src/commands.rs          暴露给前端的只读命令
   src/adapters/            每家 agent 一个实现 + 聚合逻辑
   examples/scan.rs         命令行冒烟检查，不起窗口
