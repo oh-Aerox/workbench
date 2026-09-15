@@ -1,3 +1,11 @@
 node_modules/
 dist/
 src-tauri/target/
+
+# Tauri 构建时自动生成，无需入库
+src-tauri/gen/
+
+# agent 在本项目目录里留下的自有工作目录，含本机用户名，不入库
+.workbuddy/
+.claude/
+.codex/
