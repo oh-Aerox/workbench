@@ -1,6 +1,6 @@
 # 后续计划
 
-需求原文见 [require.md](require.md)，实现细节和踩过的坑见 [README.md](README.md)。
+实现细节和踩过的坑见 [README.md](README.md)。
 本文件只记**还没做完的事**，做完一项就勾掉。
 
 ## 需求达成情况
