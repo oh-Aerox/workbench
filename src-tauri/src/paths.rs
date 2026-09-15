@@ -109,7 +109,14 @@ pub fn decode_project_dir(encoded: &str) -> String {
             return format!("{}:\\{}", drive.to_uppercase(), rest.replace('-', "\\"));
         }
     }
-    encoded.replace('-', "\\")
+    // 剩下的既不带前导 `-`、也不带盘符。WorkBuddy 在 macOS 上就是这个形状：
+    // `/Users/a/x` → `Users-a-x`，开头的 `/` 被直接吃掉了（Claude 则保留成 `-Users-a-x`）。
+    // 同一台机器上不会混两个平台产出的目录名，所以按本平台的分隔符还原。
+    #[cfg(unix)]
+    let out = format!("/{}", encoded.replace('-', "/"));
+    #[cfg(not(unix))]
+    let out = encoded.replace('-', "\\");
+    out
 }
 
 /// 统一盘符大小写。Claude 记的是 `C:\`，WorkBuddy 记的是 `c:\`，
@@ -182,6 +189,17 @@ mod tests {
     #[test]
     fn 目录名解码_posix路径() {
         assert_eq!(decode_project_dir("-Users-a-code-gallery"), "/Users/a/code/gallery");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 目录名解码_workbuddy在mac上没有前导短横() {
+        // 实机确认：macOS 上 Claude 写 `-Users-a-x`，WorkBuddy 写 `Users-a-x`。
+        // 少了前导 `-` 时不能再按 Windows 路径还原，否则会解成 `Users\\a\\x`。
+        assert_eq!(decode_project_dir("Users-alice-Downloads-test"), "/Users/alice/Downloads/test");
+        assert_eq!(decode_project_dir("Users-a-x"), "/Users/a/x");
+        // 非 ASCII 目录名（本机 WorkBuddy 里真实存在）不受影响
+        assert_eq!(decode_project_dir("Users-a-倒计时"), "/Users/a/倒计时");
     }
 
     #[test]

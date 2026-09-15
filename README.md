@@ -37,7 +37,19 @@
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`、`~/.codex/archived_sessions/`、`~/.codex/session_index.jsonl` | 按日期分目录，项目归属需从 `session_meta.cwd` 反查 |
 | WorkBuddy | `~/.workbuddy/projects/<cwd编码>/<sessionId>.jsonl`、`~/.workbuddy/sessions/<pid>.json` | 与 Claude 同形但 schema 不同；`sessions/*.json` 有心跳，可直接判定进行中 |
 
-三家在 Windows 和 macOS 上都落在用户主目录下的同名隐藏目录，路径解析无需按平台分支。
+三家在 Windows 和 macOS 上都落在用户主目录下的同名隐藏目录，**根目录**解析无需按平台分支。
+
+但 **cwd 编码成目录名的方式，三家在 macOS 上并不一致**（实机确认）：
+
+| Agent | macOS 上 `/Users/a/x` 编码成 |
+|---|---|
+| Claude Code | `-Users-a-x`　保留了开头的 `/` |
+| WorkBuddy | `Users-a-x`　　开头的 `/` 被直接吃掉 |
+| Codex | 不编码，按日期分目录 |
+
+所以 `decode_project_dir` 不能只认前导 `-`：少了它的名字在 Windows 分支里会被当成相对路径解成 `Users\a\x`。兜底解码现在按 `#[cfg(unix)]` 分平台还原——同一台机器上不会混两个平台产出的目录名，这个假设是安全的。
+
+不过这条兜底路径平时走不到：三家 adapter 都优先 `peek_cwd()` 从会话文件内容里读真实 cwd，只有文件损坏或为空时才落到解码。本机 25 个项目全部走的 peek。
 
 ### 各家能提供的字段不一样
 
@@ -146,19 +158,40 @@ cargo run --example scan -- todos    # 扫项目源码的 TODO 标记（含冷�
 出包：
 
 ```bash
-npm run tauri build
+npm run tauri build            # Windows
+CI=true npm run tauri build    # macOS，CI=true 不能省，原因见下
 ```
 
 产物：Windows `src-tauri/target/release/bundle/nsis/`，macOS `src-tauri/target/release/bundle/dmg/`。
+
+⚠️ **macOS 上 `CI=true` 是必需的**，否则打 DMG 必挂在最后一步：
+
+```
+execution error: “Finder”遇到一个错误：AppleEvent已超时。 (-1712)
+failed to bundle project: error running bundle_dmg.sh
+```
+
+`.app` 其实已经编译好了，挂掉的是 `create-dmg` 用 AppleScript 驱动 Finder 摆图标位置的**美化**步骤——终端进程没有「自动化控制 Finder」权限时它会一直等到超时。Tauri 在检测到 `CI` 环境变量时会给 `bundle_dmg.sh` 传 `--skip-jenkins` 跳过这段。跳过后 DMG 内容完全一样（app + `/Applications` 软链 + 卷图标），只是打开时图标按 Finder 默认排布。
+
+要拿到摆好位的 DMG，得去「系统设置 → 隐私与安全性 → 自动化」给终端勾上 Finder，然后不带 `CI` 重跑。对内自用不值得折腾。
 
 ### 构建环境
 
 编译期需要 Rust；**运行期不需要**，安装包里是编译好的原生二进制。
 
 - Windows：Rust（MSVC 工具链）+ VS 2022 Build Tools（C++ 工作负载）
-- macOS (Apple Silicon)：Rust + Xcode Command Line Tools
+- macOS (Apple Silicon)：Rust + Xcode Command Line Tools（`xcode-select --install`，不需要完整 Xcode）
 
 两个平台需各自本地出包，无法交叉编译。
+
+两边实测产物体积：
+
+| 平台 | 安装包 | 安装后 |
+|---|--:|--:|
+| Windows (NSIS) | 1.04 MB | — |
+| macOS (DMG, arm64) | 1.5 MB | 3.5 MB（`.app`） |
+
+macOS 产物是 arm64 单架构（`lipo -archs` 确认），不是 universal——需求只要 M 芯片，打 universal 会让体积翻倍，与需求 5 冲突。`LSMinimumSystemVersion` 设为 `11.0`：Tauri 默认值 10.13 是 Intel 时代的，arm64 本身就要 macOS 11 起步。
 
 ### 运行期依赖
 

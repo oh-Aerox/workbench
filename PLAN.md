@@ -10,38 +10,48 @@
 | 1 | agent 工作进度可视化工作台 | ✅ |
 | 2 | 只读，不写任何 agent 工作区 | ✅ 三层保证 + 4 条守卫单测 |
 | 3 | 支持 claude / codex / workbuddy | ✅ 三家适配器均已验证 |
-| 4 | 支持 Win10+ 与 Mac M 芯片 | ⚠️ **Win 已验证，Mac 未出包** |
-| 5 | 安装后体积尽可能小 | ✅ 安装包 1.04 MB |
+| 4 | 支持 Win10+ 与 Mac M 芯片 | ✅ 两端均已出包并冒烟通过 |
+| 5 | 安装后体积尽可能小 | ✅ Win 1.04 MB / Mac DMG 1.5 MB |
 | 6 | 按 agent 划分，允许项目重复 | ✅ 不做跨 agent 合并 |
 
-只剩需求 4 的 macOS 一半没完成。
+六条需求全部达成。剩余条目都是增强或未验证项，不阻塞验收。
 
 ---
 
 ## P0 · 阻塞需求验收
 
-- [ ] **macOS (Apple Silicon) 出包**
-  - 环境只需 Rust + Xcode Command Line Tools，运行期不需要 Rust
-  - `npm install && npm run tauri build`，产物在 `src-tauri/target/release/bundle/dmg/`
-  - 两平台无法交叉编译，必须在 Mac 本地跑
-- [ ] **Mac 上先验证适配器再出包**
-  - 先跑 `cd src-tauri && cargo run --example scan`
-  - 重点看 Codex：本机 `~/.codex/sessions/` 是空的、数据全在 `archived_sessions/`。
-    Mac 上若目录结构不同，`codex.rs` 的 `collect_rollouts()` 需要微调
-  - 路径解码已按平台分支处理（POSIX 绝对路径编码后以 `-` 开头），但没有真机验证过
+- [x] ~~**macOS (Apple Silicon) 出包**~~ —— 已完成
+  - `CI=true npm run tauri build`。**`CI=true` 不能省**：否则 `create-dmg` 的
+    Finder 美化步骤会卡到 AppleEvent 超时（-1712）而整个出包失败，详见 README「出包」
+  - 产物 `Agent Workbench_0.1.0_aarch64.dmg` 1.5 MB，`.app` 3.5 MB，arm64 单架构
+  - `tauri.conf.json` 补了 `bundle.macOS.minimumSystemVersion: "11.0"`
+    （Tauri 默认 10.13 是 Intel 时代的值，arm64 本身就要 11 起步）
+  - 冒烟：从 DMG 装出来启动正常，进程稳定、LaunchServices 已注册为 GUI 应用
+- [x] ~~**Mac 上先验证适配器再出包**~~ —— 已完成，`cargo test` 28 绿 + `scan` 三家全通
+  - Codex 不需要微调：本机 `~/.codex/sessions/YYYY/MM/DD/` 结构存在
+    （23 个 rollout + 4 个归档），`collect_rollouts()` 原样可用
+  - 实机解析：Claude 3 项目 / Codex 9 项目 / WorkBuddy 13 项目，路径全部正确
+  - **发现并修掉一个真实 bug**：macOS 上 Claude 把 `/Users/a/x` 编码成 `-Users-a-x`
+    （保留前导 `/`），**WorkBuddy 却编码成 `Users-a-x`（吃掉前导 `/`）**。
+    原 `decode_project_dir` 只认前导 `-`，后者会掉进 Windows 分支被解成 `Users\a\x`。
+    已按 `#[cfg(unix)]` 分平台还原并补单测。
+    注：这条兜底路径平时走不到（三家都优先 `peek_cwd` 读会话内容里的真实 cwd），
+    本机 25 个项目全部走的 peek，所以 GUI 上看不出来——属于潜伏 bug
 
 ## P1 · 未验证的代码
 
-- [ ] **验证 Codex `update_plan` 提取**
-  - `codex.rs` 的 `plan_from_call()` **从未跑过真实数据**——本机 Codex 会话里
-    没出现过这个工具，字段形状是按常见约定写的
-  - 验证方法：用 Codex 做一次带计划的任务，然后
-    `cargo run --example scan -- plans` 看能否正确提取
-  - 解析已做宽容处理（对象和纯字符串都接受，对不上就返回 None），
-    不会把整场会话的解析带崩，但正确性未知
-- [ ] **验证 Claude `TodoWrite` 提取**
-  - 同样未跑过真实数据（本机 `TodoWrite` 使用次数为 0）
-  - 用一次带任务清单的会话即可验证
+- [x] ~~**验证 Codex `update_plan` 提取**~~ —— Mac 实机数据验证通过
+  - `cargo run --example scan -- plans` 提取到 17 份计划，勾选态、条目文字、
+    伴随说明（`plan_from_call` 的正文）全部正确，字段形状的猜测是对的
+- [ ] **验证 Claude `TodoWrite` 提取** —— 仍然无法验证
+  - Mac 上照样没有真实数据：`~/.claude/projects/` 全量 grep `TodoWrite`
+    只命中 1 个文件，且是本次会话记录里的字面量，不是真实工具调用（`todos` 字段 0 处）
+  - 结论：这条要等到实际用一次带任务清单的 Claude 会话才能验，两台机器都没有样本
+- [ ] **`update_plan` 快照去重**（Mac 验证时新发现）
+  - Codex 每调一次 `update_plan` 就落一条记录，现在把每次快照都当成独立计划列出：
+    同一场会话会出现 3–5 份只差勾选进度的「任务计划」，MaxKB / canpay-web 都是如此
+  - 更合理的做法是按会话折叠、只留最后一次快照（或展示成进度演进）
+  - 不是 bug，是展示口径问题，但计划面板的信噪比明显受影响
 
 ## P2 · 数据源扩展（需先决策）
 
@@ -64,7 +74,8 @@
 - [ ] **多 agent 横向对比**：同一项目被不同 agent 跑过时的用量对比
 - [ ] **代码签名**（仅对外分发时需要）
   - Windows：未签名会弹 SmartScreen，需 OV 证书
-  - macOS：未签名会被 Gatekeeper 拦，需 Apple 开发者账号 + 公证
+  - macOS：当前是 adhoc linker-signed（`codesign -dv` 确认），本机自装没问题，
+    但拷给别人会被 Gatekeeper 拦；正式分发需 Apple 开发者账号 + 公证
 
 ---
 
