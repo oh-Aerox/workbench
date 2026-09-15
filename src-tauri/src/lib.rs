@@ -20,6 +20,7 @@ pub fn run() {
             commands::project_outcome,
             commands::project_plans,
             commands::project_todos,
+            commands::project_docs,
             commands::agent_activity,
             commands::search,
         ])
