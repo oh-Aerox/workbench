@@ -29,6 +29,9 @@
     "icon": ["icons/icon.ico", "icons/icon.icns"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
     }
   }
 }
