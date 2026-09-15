@@ -3,6 +3,7 @@ pub mod commands;
 pub mod index;
 pub mod model;
 pub mod paths;
+pub mod repo;
 pub mod watcher;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,6 +19,8 @@ pub fn run() {
             commands::list_sessions,
             commands::project_outcome,
             commands::project_plans,
+            commands::project_todos,
+            commands::project_docs,
             commands::agent_activity,
             commands::search,
         ])
