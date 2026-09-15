@@ -6,6 +6,7 @@
 //!   cargo run --example scan -- heat     按天活动量 + 缓存冷热对比
 //!   cargo run --example scan -- find 关键词   全局搜索
 //!   cargo run --example scan -- plans   列每个项目提取到的计划 / 待办
+//!   cargo run --example scan -- todos   扫项目源码里的 TODO 标记
 //!
 //! 用来验证解析逻辑对本机真实数据是否正确，改完 adapter 先跑这个再开 GUI。
 use agent_workbench_lib::adapters::adapter_for;
@@ -22,6 +23,9 @@ fn main() {
     }
     if args.iter().any(|a| a == "plans") {
         return plans();
+    }
+    if args.iter().any(|a| a == "todos") {
+        return todos();
     }
     if let Some(i) = args.iter().position(|a| a == "find") {
         return find(args.get(i + 1).map(String::as_str).unwrap_or(""));
@@ -187,4 +191,46 @@ fn plans() {
         }
     }
     println!("\n共提取到 {} 份计划 / 待办", total);
+}
+
+
+/// 扫项目源码的 TODO 标记，顺带对比缓存冷热。
+fn todos() {
+    use std::collections::BTreeMap;
+    let adapter = adapter_for(AgentKind::Claude);
+    for p in adapter.list_projects() {
+        let r = agent_workbench_lib::repo::scan_project(std::path::Path::new(&p.path));
+        if !r.exists {
+            println!("[{}] 目录已不存在，跳过", p.name);
+            continue;
+        }
+        let warm = agent_workbench_lib::repo::scan_project(std::path::Path::new(&p.path));
+        println!(
+            "
+[{}] {} 处标记 / {} 份待办文档 / 扫 {} 个文件{}
+  首次 {}ms  缓存后 {}ms",
+            p.name,
+            r.todos.len(),
+            r.docs.len(),
+            r.files_scanned,
+            if r.truncated { "  <已截断>" } else { "" },
+            r.elapsed_ms,
+            warm.elapsed_ms
+        );
+        let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
+        for t in &r.todos {
+            *by_file.entry(&t.file).or_insert(0) += 1;
+        }
+        let mut v: Vec<_> = by_file.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        for (f, n) in v.iter().take(4) {
+            println!("    {:>3}  {}", n, f);
+        }
+        for t in r.todos.iter().take(2) {
+            println!("    例: {}:{} [{}] {}", t.file, t.line, t.marker, t.text);
+        }
+        for d in r.docs.iter().take(2) {
+            println!("    文档: {}  {}/{} 已完成", d.file, d.done, d.total);
+        }
+    }
 }

@@ -145,6 +145,43 @@ pub struct PlanRecord {
     pub entry: PlanEntry,
 }
 
+/// 项目源码里的一条 TODO 标记。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoTodo {
+    /// 相对项目根的路径
+    pub file: String,
+    pub line: usize,
+    /// TODO / FIXME / XXX / HACK
+    pub marker: String,
+    pub text: String,
+}
+
+/// 仓库里的一份待办文档（TODO.md 之类）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoTodoDoc {
+    pub file: String,
+    pub total: usize,
+    pub done: usize,
+    pub items: Vec<TodoItem>,
+}
+
+/// 一次源码扫描的结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoTodoReport {
+    pub root: String,
+    /// 项目目录是否还在（agent 记录里的项目可能已被删除或移动）
+    pub exists: bool,
+    pub todos: Vec<RepoTodo>,
+    pub docs: Vec<RepoTodoDoc>,
+    pub files_scanned: usize,
+    /// 触到遍历或命中上限，结果不完整
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+}
+
 /// 热力图的一格。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
