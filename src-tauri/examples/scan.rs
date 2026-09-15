@@ -199,6 +199,7 @@ fn todos() {
     use std::collections::BTreeMap;
     let adapter = adapter_for(AgentKind::Claude);
     for p in adapter.list_projects() {
+        let docs = agent_workbench_lib::repo::scan_docs(std::path::Path::new(&p.path));
         let r = agent_workbench_lib::repo::scan_project(std::path::Path::new(&p.path));
         if !r.exists {
             println!("[{}] 目录已不存在，跳过", p.name);
@@ -207,11 +208,11 @@ fn todos() {
         let warm = agent_workbench_lib::repo::scan_project(std::path::Path::new(&p.path));
         println!(
             "
-[{}] {} 处标记 / {} 份待办文档 / 扫 {} 个文件{}
+[{}] {} 处标记 / {} 份计划文档 / 扫 {} 个文件{}
   首次 {}ms  缓存后 {}ms",
             p.name,
             r.todos.len(),
-            r.docs.len(),
+            docs.len(),
             r.files_scanned,
             if r.truncated { "  <已截断>" } else { "" },
             r.elapsed_ms,
@@ -229,8 +230,16 @@ fn todos() {
         for t in r.todos.iter().take(2) {
             println!("    例: {}:{} [{}] {}", t.file, t.line, t.marker, t.text);
         }
-        for d in r.docs.iter().take(2) {
-            println!("    文档: {}  {}/{} 已完成", d.file, d.done, d.total);
+        for d in docs.iter().take(3) {
+            let done = d.items.iter().filter(|t| t.status == "completed").count();
+            println!(
+                "    计划文档: {}  「{}」  {}/{} 已完成，正文 {} 字",
+                d.source,
+                d.title,
+                done,
+                d.items.len(),
+                d.body.as_ref().map(|b| b.chars().count()).unwrap_or(0)
+            );
         }
     }
 }
