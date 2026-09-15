@@ -1,8 +1,9 @@
 <script>
   import Markdown from './Markdown.svelte'
+  import RepoTodos from './RepoTodos.svelte'
   import { relTime } from './format.js'
 
-  let { plans, loading, agent } = $props()
+  let { plans, loading, agent, repoReport, repoScanning, repoError, onscan } = $props()
 
   // 默认展开最新一份，其余折叠
   let open = $state(new Set([0]))
@@ -20,10 +21,11 @@
 
 {#if loading}
   <div class="hint">提取中…</div>
-{:else if !plans.length}
+{:else}
+{#if !plans.length}
   <div class="empty">
-    <p class="lead">没有提取到计划或待办</p>
-    <p>工作台只从 agent 自己的记录里读，不扫描项目源码。目前支持的来源：</p>
+    <p class="lead">该项目没有 agent 计划记录</p>
+    <p>这一栏读的是 agent 自己产出的计划，来源：</p>
     <ul>
       <li><b>Claude Code</b> — 计划模式（<code>ExitPlanMode</code>）产出的实施计划、<code>TodoWrite</code> 任务清单、<code>~/.claude/plans/*.md</code></li>
       <li><b>Codex</b> — <code>update_plan</code> 工具的步骤清单</li>
@@ -35,6 +37,7 @@
       {:else}
         该项目还没用过计划模式。用 Claude Code 的计划模式做一次规划，这里就会出现。
       {/if}
+      项目源码里的 TODO 标记是另一套来源，见下方。
     </p>
   </div>
 {:else}
@@ -77,6 +80,9 @@
       </article>
     {/each}
   </div>
+{/if}
+
+<RepoTodos report={repoReport} scanning={repoScanning} error={repoError} {onscan} />
 {/if}
 
 <style>

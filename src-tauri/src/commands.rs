@@ -1,10 +1,11 @@
 //! 暴露给前端的命令。全部只读，没有任何一个命令能写 agent 目录。
 use crate::adapters::adapter_for;
 use crate::model::{
-    AgentKind, AgentSummary, DayActivity, PlanRecord, ProjectOutcome, ProjectSummary, SearchHit,
-    SessionSummary,
+    AgentKind, AgentSummary, DayActivity, PlanRecord, ProjectOutcome, ProjectSummary,
+    RepoTodoReport, SearchHit, SessionSummary,
 };
 use crate::paths::agent_root;
+use crate::repo;
 
 /// 左侧 agent 栏。未安装的 agent 也返回（installed=false），前端置灰而不是消失，
 /// 这样用户知道工作台支持它、只是本机没装。
@@ -60,6 +61,35 @@ pub fn project_outcome(agent: String, project_id: String) -> Result<ProjectOutco
 pub fn project_plans(agent: String, project_id: String) -> Result<Vec<PlanRecord>, String> {
     let kind = AgentKind::from_id(&agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
     Ok(adapter_for(kind).project_plans(&project_id))
+}
+
+/// 扫描项目工作目录里的 TODO 标记和待办文档。
+///
+/// **这是唯一会读 agent 数据目录之外文件的命令**，所以加了白名单：目标必须
+/// 确实出现在某个 agent 的项目列表里。前端传来的路径不可信——没有这道校验，
+/// 任何能调到这个命令的地方都能让应用去遍历机器上的任意目录。
+/// 大项目首次扫描可能要几十秒（本机 eshop 7162 个文件耗时 85 秒，绝大部分
+/// 时间花在逐个读文件上），所以必须丢到阻塞线程池，不能占着 UI 线程；
+/// 前端那边也做成按钮触发而非切项目就自动扫。
+#[tauri::command]
+pub async fn project_todos(project_path: String) -> Result<RepoTodoReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = project_path.to_lowercase();
+        let known = AgentKind::all().into_iter().any(|kind| {
+            agent_root(kind).map(|p| p.exists()) == Some(true)
+                && adapter_for(kind)
+                    .list_projects()
+                    .iter()
+                    .any(|p| p.path.to_lowercase() == target)
+        });
+
+        if !known {
+            return Err(format!("拒绝扫描：{project_path} 不在任何 agent 的项目列表里"));
+        }
+        Ok(repo::scan_project(std::path::Path::new(&project_path)))
+    })
+    .await
+    .map_err(|e| format!("扫描任务失败: {e}"))?
 }
 
 /// 该 agent 的按天活动量，供热力图。首次调用会全量解析，之后走缓存。

@@ -6,6 +6,7 @@
     listSessions,
     projectOutcome,
     projectPlans,
+    projectTodos,
     agentActivity,
     search as searchApi,
   } from './lib/api.js'
@@ -21,6 +22,11 @@
   let sessions = $state([])
   let outcome = $state(null)
   let plans = $state([])
+  // 源码 TODO 是唯一读 agent 目录之外文件的功能，故手动触发、按项目缓存结果
+  let repoReport = $state(null)
+  let repoScanning = $state(false)
+  let repoError = $state(null)
+  const repoCache = new Map()
   let days = $state([])
   let loadingProjects = $state(false)
   let loadingSessions = $state(false)
@@ -43,6 +49,8 @@
       sessions = []
       outcome = null
       plans = []
+      repoReport = null
+      repoError = null
     }
     projects = []
     days = []
@@ -71,6 +79,9 @@
     sessions = []
     outcome = null
     plans = []
+    // 切项目时把上一个项目的扫描结果换掉，命中过就直接复用
+    repoReport = repoCache.get(project.path) ?? null
+    repoError = null
     loadingSessions = true
     try {
       // 三个视图解析的是同一批 JSONL（缓存共用），一次并发取完，切 tab 不用再等
@@ -86,6 +97,24 @@
       error = String(e)
     } finally {
       loadingSessions = false
+    }
+  }
+
+  /** 手动触发源码扫描。大项目首次可能几十秒，所以不在切项目时自动跑。 */
+  async function scanRepo() {
+    const path = activeProjectName
+    if (!path || repoScanning) return
+    repoScanning = true
+    repoError = null
+    try {
+      const r = await projectTodos(path)
+      repoCache.set(path, r)
+      // 扫描期间用户可能已经切走了，别把结果盖到别的项目上
+      if (activeProjectName === path) repoReport = r
+    } catch (e) {
+      if (activeProjectName === path) repoError = String(e)
+    } finally {
+      repoScanning = false
     }
   }
 
@@ -224,6 +253,10 @@
     hasProject={!!activeProject}
     projectName={activeProjectName}
     onopen={openHit}
+    {repoReport}
+    {repoScanning}
+    {repoError}
+    onscan={scanRepo}
   />
 </div>
 

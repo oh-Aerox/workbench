@@ -19,6 +19,10 @@
     hasProject,
     projectName,
     onopen,
+    repoReport,
+    repoScanning,
+    repoError,
+    onscan,
   } = $props()
 
   // 默认落在「成果」：先看项目被改成了什么样，再按需回看过程
@@ -59,7 +63,7 @@
     {:else if tab === 'outcome'}
       <OutcomeView {outcome} {loading} />
     {:else if tab === 'plans'}
-      <PlansView {plans} {loading} {agent} />
+      <PlansView {plans} {loading} {agent} {repoReport} {repoScanning} {repoError} {onscan} />
     {:else}
       <SessionList {sessions} {loading} {hasProject} />
     {/if}
