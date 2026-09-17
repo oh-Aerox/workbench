@@ -19,6 +19,12 @@ use crate::paths::agent_root;
 /// 安静期。攒到这么久没有新事件才发通知。
 const DEBOUNCE: Duration = Duration::from_millis(1200);
 
+/// 去抖的绝对上限。只看安静期会有一个要命的退化：agent 高频写入时事件间隔
+/// 持续小于 `DEBOUNCE`（一次工具调用就连写多行，正好落在这个区间），循环就
+/// 无限延长，通知永远发不出去——表现为「agent 越忙，UI 越不刷新」，恰好和
+/// 用户的期待相反。攒够这么久就强制发一次，之后重新开始攒。
+const MAX_DEBOUNCE: Duration = Duration::from_secs(5);
+
 /// 判断变动路径属于哪个 agent。
 fn owner_of(path: &Path) -> Option<AgentKind> {
     let s = path.to_string_lossy().to_lowercase();
@@ -73,8 +79,17 @@ pub fn start(app: AppHandle) {
                 }
             };
             note(first);
-            while let Ok(ev) = rx.recv_timeout(DEBOUNCE) {
-                note(ev);
+            let deadline = std::time::Instant::now() + MAX_DEBOUNCE;
+            loop {
+                // 安静期和绝对上限取较小者：谁先到就停止攒事件
+                let wait = DEBOUNCE.min(deadline.saturating_duration_since(std::time::Instant::now()));
+                if wait.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(wait) {
+                    Ok(ev) => note(ev),
+                    Err(_) => break,
+                }
             }
 
             for kind in changed {

@@ -16,12 +16,12 @@
 //! `providerData.model`；目录编码首字母小写（`c--Users-...`）。
 //! 另外 WorkBuddy 不写 cost-state，所以没有花费和增删行数。
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{cached_collect, local_day, make_title, now_ms, AgentAdapter, RUNNING_WINDOW_MS};
+use super::{cached_collect, local_day, lossy_lines, make_title, now_ms, AgentAdapter, RUNNING_WINDOW_MS};
 use crate::model::{AgentKind, FileTouch, ParsedSession, ProjectSummary, SessionSummary};
 use crate::paths::{
     agent_root, decode_project_dir, normalize_drive, open_readonly, project_display_name,
@@ -41,7 +41,8 @@ fn projects_dir() -> Option<PathBuf> {
 fn peek_cwd(path: &Path) -> Option<String> {
     let file = open_readonly(path).ok()?;
     let reader = BufReader::with_capacity(64 * 1024, file);
-    for line in reader.lines().map_while(Result::ok).take(80) {
+    // lossy_lines：一个非 UTF-8 行不该让 cwd 读不到而退回有损的 decode_project_dir
+    for line in lossy_lines(reader).take(80) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -179,7 +180,8 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         }
     }
 
-    for line in reader.lines().map_while(Result::ok) {
+    // lossy_lines 而非 lines()：坏字节不能截断后面的内容，理由见其文档
+    for line in lossy_lines(reader) {
         if line.trim().is_empty() {
             continue;
         }
@@ -246,7 +248,6 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         .map(make_title)
         .unwrap_or_else(|| id.chars().take(8).collect());
 
-    let last_write = mtime_ms(path).unwrap_or(0);
     let project_path = normalize_drive(&cwd.unwrap_or_else(|| decode_project_dir(project_id)));
 
     let touches: Vec<FileTouch> = files
@@ -277,7 +278,9 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         lines_added: 0,
         lines_removed: 0,
         cost_usd: None,
-        running: now_ms() - last_write < RUNNING_WINDOW_MS,
+        // 占位：running 是 now - mtime 的函数，进缓存会被永久固化。
+        // 真正的取值在 `cached_collect` 里按当前 mtime 现算。
+        running: false,
         bytes,
     };
 

@@ -2,8 +2,19 @@
 //!
 //! 需求 2：本应用绝不写入任何 agent 工作区。保证分三层：
 //!   1. 读 agent 数据一律走 `open_readonly`，句柄本身没有写权限；
-//!   2. 任何写操作必须先过 `assert_app_owned`，越界直接 panic；
-//!   3. tauri.conf.json 不开放 fs / shell 权限，前端拿不到写能力。
+//!   2. 任何写操作必须走本模块的 `write_app_file` / `rename_app_file` /
+//!      `remove_app_file`，它们内部先过 `assert_app_owned`，越界直接 panic；
+//!   3. Cargo.toml 根本没引入 tauri-plugin-fs / tauri-plugin-shell，
+//!      写文件的代码压根没被编译进二进制，前端无论如何拿不到写能力。
+//!
+//! 第 2 层原先只是「记得调用断言」的约定：`std::fs::write` 在 crate 里任何地方
+//! 都能直接调，一次疏忽的提交就能破坏这条全项目最高优先级的不变量，而守卫单测
+//! 只验「守卫函数判得对不对」，验不了「是否所有写操作都过了守卫」。现在把写操作
+//! 收成本模块的唯一出口，并用 `写操作只能出现在_paths_rs` 这条单测做静态兜底。
+//!
+//! 读侧还有一条对称的 `resolve_under`：从**会话文件内容里读出来的名字**（如
+//! `~/.claude/plans/<slug>.md` 的 slug）拼路径前必须过它，否则 `../../机密`
+//! 这种值会把任意文件读进计划面板。
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,10 +36,19 @@ pub fn agent_root(kind: AgentKind) -> Option<PathBuf> {
 /// 本应用自己的数据目录，索引缓存只允许落在这里。
 /// Windows: %LOCALAPPDATA%\AgentWorkbench
 /// macOS:   ~/Library/Application Support/AgentWorkbench
+///
+/// **纯函数，只算路径不碰文件系统**：`assert_app_owned` 会调它，而一个断言
+/// 函数不该有副作用（原先这里带 `create_dir_all`，等于「检查一下」就顺手建了目录）。
+/// 需要目录真实存在时用 `ensure_app_data_dir`。
 pub fn app_data_dir() -> io::Result<PathBuf> {
     let base = dirs::data_local_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "无法定位用户数据目录"))?;
-    let dir = base.join("AgentWorkbench");
+    Ok(base.join("AgentWorkbench"))
+}
+
+/// 同上，但确保目录已建好。只有真要写盘时才调。
+pub fn ensure_app_data_dir() -> io::Result<PathBuf> {
+    let dir = app_data_dir()?;
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -93,6 +113,59 @@ pub fn assert_app_owned(path: &Path) {
     }
 }
 
+/// 写文件。**全 crate 唯一允许写盘的出口**，内部先做越界断言。
+pub fn write_app_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    assert_app_owned(path);
+    ensure_app_data_dir()?;
+    std::fs::write(path, bytes)
+}
+
+/// 改名。先写临时文件再改名是为了避免留下半个损坏的缓存，两端都要断言。
+pub fn rename_app_file(from: &Path, to: &Path) -> io::Result<()> {
+    assert_app_owned(from);
+    assert_app_owned(to);
+    std::fs::rename(from, to)
+}
+
+/// 删文件。目标本来就不存在不算错误。
+pub fn remove_app_file(path: &Path) -> io::Result<()> {
+    assert_app_owned(path);
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+/// 读侧守卫：把一个**从外部数据里读出来的文件名**安全地拼到 `dir` 之下。
+///
+/// 写侧有 `assert_app_owned`，读侧一直缺一个对称的东西。`~/.claude/plans/<slug>.md`
+/// 的 slug 直接取自会话 JSONL 的 `slug` 字段，未经任何校验就拼进路径——slug 为
+/// `../../../Desktop/机密` 时会把 `~/Desktop/机密.md` 整篇读出来渲染进计划面板。
+/// 会话文件是会被复制、同步、从他处拷入的数据，不该当成可信输入。
+///
+/// 规则：文件名必须是单个普通路径组件（无分隔符、无盘符、无 `.` / `..`、无控制
+/// 字符），且拼出的路径归一化后仍落在 `dir` 内。两道都过了才返回路径。
+pub fn resolve_under(dir: &Path, name: &str) -> Option<PathBuf> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+    {
+        return None;
+    }
+    // 只接受单个 Normal 组件：`.` / `..` 是 CurDir / ParentDir，会在这里落空
+    let mut comps = Path::new(name).components();
+    if !matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) {
+        return None;
+    }
+
+    let joined = dir.join(name);
+    normalize(&joined).starts_with(normalize(dir)).then_some(joined)
+}
+
 /// Claude / WorkBuddy 把 cwd 编码成目录名（分隔符换成 `-`）。
 ///
 /// **这个编码是有损的**：路径里本来就带 `-` 的目录（如 `my-notes`）解码后会被
@@ -146,7 +219,7 @@ mod tests {
 
     #[test]
     fn 应用数据目录内的写入被放行() {
-        let dir = app_data_dir().expect("应用数据目录应可创建");
+        let dir = app_data_dir().expect("应用数据目录路径应可解析");
         assert_app_owned(&dir.join("index.db"));
         assert_app_owned(&dir.join("sub").join("nested.json"));
     }
@@ -161,7 +234,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "路径含 `..`")]
     fn 用_双点_跳出应用目录被拦截() {
-        let dir = app_data_dir().expect("应用数据目录应可创建");
+        let dir = app_data_dir().expect("应用数据目录路径应可解析");
         // 尾段里的 `..` 不会被 canonicalize 解析，只能靠组件检查挡住
         assert_app_owned(&dir.join("..").join("..").join("evil.jsonl"));
     }
@@ -171,6 +244,89 @@ mod tests {
     fn 写入任意用户目录被拦截() {
         let home = dirs::home_dir().expect("home 应可解析");
         assert_app_owned(&home.join("Desktop").join("whatever.txt"));
+    }
+
+    #[test]
+    fn 读侧守卫拦截路径穿越的_slug() {
+        let plans = agent_root(AgentKind::Claude).expect("home 应可解析").join("plans");
+        // 正常 slug 放行
+        assert!(resolve_under(&plans, "fix-login.md").is_some());
+        assert!(resolve_under(&plans, "重构计划.md").is_some(), "非 ASCII 文件名是合法的");
+
+        // 会话 JSONL 里的 slug 不可信：下面这些值原先会被直接拼进路径
+        assert!(resolve_under(&plans, "../../../Desktop/机密.md").is_none());
+        assert!(resolve_under(&plans, "..\\..\\evil.md").is_none());
+        assert!(resolve_under(&plans, "sub/evil.md").is_none());
+        assert!(resolve_under(&plans, "C:\\Windows\\win.ini").is_none());
+        assert!(resolve_under(&plans, "..").is_none());
+        assert!(resolve_under(&plans, ".").is_none());
+        assert!(resolve_under(&plans, "").is_none());
+        assert!(resolve_under(&plans, "a\nb.md").is_none(), "控制字符一律拒绝");
+    }
+
+    #[test]
+    fn 写操作只能出现在_paths_rs() {
+        // 第 2 层守卫原本靠「记得调用 assert_app_owned」维持，是全项目唯一没有
+        // 自动化兜底的不变量：现有守卫单测只验守卫函数判得对不对，验不了是否所有
+        // 写操作都过了守卫。这条测试就是那个兜底——任何绕过 paths.rs 直接写盘的
+        // 新代码都会让它变红。新增写操作请走 write_app_file / rename_app_file /
+        // remove_app_file。
+        const WRITE_CALLS: &[&str] = &[
+            "fs::write(",
+            "fs::rename(",
+            "fs::remove_file(",
+            "fs::remove_dir",
+            "fs::create_dir",
+            "fs::copy(",
+            "File::create(",
+            "OpenOptions",
+        ];
+
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut offenders: Vec<String> = Vec::new();
+
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src 目录应可读").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // paths.rs 自己就是那个唯一出口
+                if path.file_name().and_then(|n| n.to_str()) == Some("paths.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("源文件应可读");
+                for (i, line) in text.lines().enumerate() {
+                    // 只看代码，注释里提到函数名不算
+                    let code = line.split("//").next().unwrap_or("");
+                    if WRITE_CALLS.iter().any(|m| code.contains(m)) {
+                        offenders.push(format!("{}:{} {}", path.display(), i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "写操作必须走 paths.rs 的封装（它们内部已做越界断言）：
+{}",
+            offenders.join("
+")
+        );
+    }
+
+    #[test]
+    fn 断言不创建目录() {
+        // 断言函数不该有副作用。这里断言一个深层不存在的路径，
+        // 跑完之后那些目录必须仍然不存在。
+        let deep = app_data_dir().expect("应用数据目录路径应可解析").join("断言不该建这个目录");
+        assert_app_owned(&deep.join("x.json"));
+        assert!(!deep.exists(), "assert_app_owned 不该顺手建目录");
     }
 
     #[test]

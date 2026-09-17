@@ -132,6 +132,18 @@ pub struct PlanEntry {
     pub items: Vec<TodoItem>,
     /// 来源标记，如 ExitPlanMode / TodoWrite / plans/xxx.md / update_plan
     pub source: String,
+    /// 这份清单在本场会话里被刷新过几次。
+    ///
+    /// `update_plan` / `TodoWrite` 记的是同一份清单的进度快照，每调一次落一条，
+    /// 折叠后只留最后一条（见 `adapters::fold_plan_snapshots`）。这个计数保留
+    /// 「被折叠掉多少份」的信息，前端在 >1 时显示成「演进 N 次」角标。
+    #[serde(default = "one")]
+    pub revisions: usize,
+}
+
+/// `revisions` 的默认值。老缓存里没有这个字段，反序列化时按「只有一份」算。
+fn one() -> usize {
+    1
 }
 
 /// 带上会话归属的计划，给前端用。
