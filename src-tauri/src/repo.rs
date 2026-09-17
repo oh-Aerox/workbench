@@ -73,10 +73,11 @@ fn is_ignored_dir(name: &str) -> bool {
 /// 文件名像不像计划 / 待办文档。
 fn is_todo_doc(name: &str) -> bool {
     let lower = name.to_lowercase();
-    if !lower.ends_with(".md") && !lower.ends_with(".txt") {
+    // `trim_end_matches` 会**反复**剥离后缀：`plan.md.md` 会被剥成 `plan`
+    // 判成计划文档，`a.txt.md` 剥成 `a`。只该剥一次，所以用 strip_suffix。
+    let Some(stem) = lower.strip_suffix(".md").or_else(|| lower.strip_suffix(".txt")) else {
         return false;
-    }
-    let stem = lower.trim_end_matches(".md").trim_end_matches(".txt");
+    };
     matches!(
         stem,
         "todo" | "todos" | "roadmap" | "plan" | "plans" | "backlog" | "tasks" | "milestones"
@@ -143,6 +144,8 @@ pub fn scan_docs(root: &Path) -> Vec<PlanEntry> {
                 items: extract_checkboxes(content),
                 body: Some(content.chars().take(MAX_DOC_CHARS).collect()),
                 source: rel,
+                // 项目里的计划文档就是一份文件，没有快照演进的概念
+                revisions: 1,
             });
         }
     }
@@ -164,7 +167,11 @@ fn read_text(path: &Path, size: u64) -> Option<String> {
     if buf.iter().take(8192).any(|b| *b == 0) {
         return None;
     }
-    String::from_utf8(buf).ok()
+    // 用 lossy 而不是 `String::from_utf8(..).ok()?`：后者对 GBK / UTF-16 源文件
+    // 直接返回 None，会被当成「不该扫的文件」缓存成空结果，**静默跳过且不再重试**。
+    // 中文项目里 GBK 源码并不罕见，整片文件的 TODO 就这么没了。
+    // 非法字节换成替换字符后，ASCII 的 TODO / FIXME 标记依然能正常命中。
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// 从一个文件的内容里抽出 TODO 标记。
@@ -313,6 +320,9 @@ mod tests {
         assert!(is_todo_doc("开发计划.md"));
         assert!(!is_todo_doc("README.md"), "README 是说明不是计划");
         assert!(!is_todo_doc("todo.rs"), "只认 md 和 txt");
+        // 后缀只该剥一次：trim_end_matches 会连着剥，把这两个误判成计划文档
+        assert!(!is_todo_doc("plan.md.md"), "重复后缀不该被剥成 plan");
+        assert!(!is_todo_doc("a.txt.md"));
     }
 
     #[test]

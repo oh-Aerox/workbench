@@ -7,20 +7,21 @@
 //!   cost-state               总花费、增删行数、各模型 token 用量
 //!   file-history-snapshot    file-history-delta  本次会话触达过的文件
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use super::{
-    cached_collect, extract_checkboxes, local_day, make_title, markdown_title, now_ms,
-    parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS,
+    cached_collect, extract_checkboxes, fold_plan_snapshots, local_day, lossy_lines, make_title,
+    markdown_title, now_ms, parse_iso_ms, strip_injected, AgentAdapter, RUNNING_WINDOW_MS,
 };
 use crate::model::{
     AgentKind, FileTouch, ParsedSession, PlanEntry, ProjectSummary, SessionSummary, TodoItem,
 };
 use crate::paths::{
     agent_root, decode_project_dir, normalize_drive, open_readonly, project_display_name,
+    resolve_under,
 };
 
 pub struct ClaudeAdapter;
@@ -49,7 +50,8 @@ fn peek_meta(path: &Path) -> (Option<String>, Option<String>) {
     let mut cwd = None;
     let mut branch = None;
 
-    for line in reader.lines().map_while(Result::ok).take(60) {
+    // lossy_lines：一个非 UTF-8 行不该让 cwd 读不到而退回有损的 decode_project_dir
+    for line in lossy_lines(reader).take(60) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -186,6 +188,7 @@ fn plan_from_tool(block: &Value, at: Option<i64>) -> Option<PlanEntry> {
                 items: extract_checkboxes(plan),
                 body: Some(plan.to_string()),
                 source: "ExitPlanMode".into(),
+                revisions: 1,
             })
         }
         "TodoWrite" => {
@@ -215,6 +218,7 @@ fn plan_from_tool(block: &Value, at: Option<i64>) -> Option<PlanEntry> {
                 body: None,
                 items,
                 source: "TodoWrite".into(),
+                revisions: 1,
             })
         }
         _ => None,
@@ -224,9 +228,20 @@ fn plan_from_tool(block: &Value, at: Option<i64>) -> Option<PlanEntry> {
 /// 读 ~/.claude/plans/<slug>.md。
 ///
 /// 计划文件可能已被删除（Claude 会清理），读不到就跳过，不当错误。
+///
+/// **slug 来自会话 JSONL 的内容，是不可信输入**：原先直接 `join(format!("{slug}.md"))`，
+/// slug 为 `../../../Desktop/机密` 时会把 `~/Desktop/机密.md` 整篇读出来渲染进
+/// 计划面板。会话文件是会被复制、同步、从他处拷入的数据，必须过 `resolve_under`
+/// 这道读侧守卫（写侧 `assert_app_owned` 的对称物）。
+///
+/// 另外这里改走 `open_readonly` 而不是 `std::fs::read_to_string`：只读守卫第 1 层
+/// 声明「读 agent 数据一律走 open_readonly」，原先这一处是唯一的例外。
 fn plan_from_file(slug: &str, at: Option<i64>) -> Option<PlanEntry> {
-    let path = agent_root(AgentKind::Claude)?.join("plans").join(format!("{slug}.md"));
-    let body = std::fs::read_to_string(&path).ok()?;
+    let plans_dir = agent_root(AgentKind::Claude)?.join("plans");
+    let path = resolve_under(&plans_dir, &format!("{slug}.md"))?;
+    let mut file = open_readonly(&path).ok()?;
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut file, &mut body).ok()?;
     let body = body.trim();
     if body.is_empty() {
         return None;
@@ -238,6 +253,7 @@ fn plan_from_file(slug: &str, at: Option<i64>) -> Option<PlanEntry> {
         items: extract_checkboxes(body),
         body: Some(body.to_string()),
         source: format!("plans/{slug}.md"),
+        revisions: 1,
     })
 }
 
@@ -300,7 +316,8 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         }
     }
 
-    for line in reader.lines().map_while(Result::ok) {
+    // lossy_lines 而非 lines()：坏字节不能截断后面的内容，理由见其文档
+    for line in lossy_lines(reader) {
         if line.trim().is_empty() {
             continue;
         }
@@ -417,7 +434,6 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         .or_else(|| first_prompt.as_deref().map(make_title))
         .unwrap_or_else(|| id.chars().take(8).collect());
 
-    let last_write = mtime_ms(path).unwrap_or(0);
     let project_path = normalize_drive(&cwd.unwrap_or_else(|| decode_project_dir(project_id)));
 
     let touches: Vec<FileTouch> = files
@@ -460,9 +476,18 @@ fn parse_session(path: &Path, project_id: &str) -> Option<ParsedSession> {
         lines_added,
         lines_removed,
         cost_usd,
-        running: now_ms() - last_write < RUNNING_WINDOW_MS,
+        // 占位：running 是 now - mtime 的函数，进缓存就会被永久固化成解析当时的
+        // 值。真正的取值在 `cached_collect` 里按当前 mtime 现算。
+        running: false,
         bytes,
     };
 
-    Some(ParsedSession { summary, files: touches, daily, first_prompt, plans })
+    // 同一份 TodoWrite 清单每刷新一次就落一条记录，折叠成最后一条 + 演进次数
+    let plans = fold_plan_snapshots(plans);
+
+    // 存剥掉注入上下文后的真人输入，与 WorkBuddy 保持一致：否则搜索会命中
+    // `<system-reminder>` 里的注入内容，摘要显示成 `OS Version: win32` 之类
+    let searchable = first_prompt.as_deref().map(strip_injected);
+
+    Some(ParsedSession { summary, files: touches, daily, first_prompt: searchable, plans })
 }

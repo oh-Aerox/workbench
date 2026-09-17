@@ -5,12 +5,27 @@
 
   let { plans, loading, agent, repoReport, repoScanning, repoError, onscan } = $props()
 
-  // 默认展开最新一份，其余折叠
-  let open = $state(new Set([0]))
+  // 折叠状态按**内容键**存，不能按数组下标：文件监听触发重新加载后，列表内容
+  // 会变而下标不变，展开的就成了「位置相同的另一份计划」。
+  function keyOf(p) {
+    return `${p.agent}|${p.sessionId}|${p.source}|${p.at ?? ''}`
+  }
 
-  function toggle(i) {
+  let open = $state(new Set())
+  // 默认展开第一份（项目计划文档排在最前，其次是 agent 计划）
+  let defaultKey = $derived(plans.length ? keyOf(plans[0]) : null)
+
+  function isOpen(p) {
+    const k = keyOf(p)
+    return open.has(k) || (defaultKey === k && !open.size)
+  }
+
+  function toggle(p) {
+    const k = keyOf(p)
     const next = new Set(open)
-    next.has(i) ? next.delete(i) : next.add(i)
+    // 首次点击时把「默认展开的那份」也物化进集合，否则一点别的就会把它一起关掉
+    if (!next.size && defaultKey && defaultKey !== k) next.add(defaultKey)
+    next.has(k) ? next.delete(k) : next.add(k)
     open = next
   }
 
@@ -44,12 +59,18 @@
   </div>
 {:else}
   <div class="wrap">
-    {#each plans as p, i (p.sessionId + p.source + i)}
-      {@const isOpen = open.has(i)}
+    {#each plans as p (keyOf(p))}
+      {@const expanded = isOpen(p)}
       <article class="plan">
-        <button class="head" onclick={() => toggle(i)}>
-          <span class="caret" class:open={isOpen}>▸</span>
+        <button class="head" onclick={() => toggle(p)}>
+          <span class="caret" class:open={expanded}>▸</span>
           <span class="title">{p.title}</span>
+          {#if p.revisions > 1}
+            <!-- update_plan / TodoWrite 的历次快照已折叠成一条，这里标出演进次数 -->
+            <span class="rev" title="这份清单在会话里刷新过 {p.revisions} 次，已折叠为最新一份">
+              演进 {p.revisions} 次
+            </span>
+          {/if}
           {#if p.items.length}
             <span class="progress">{done(p.items)}/{p.items.length}</span>
           {/if}
@@ -63,7 +84,7 @@
           </div>
         {/if}
 
-        {#if isOpen}
+        {#if expanded}
           <div class="body">
             {#if p.items.length && !p.body}
               <!-- TodoWrite / update_plan 是结构化清单，没有正文 -->
@@ -135,6 +156,15 @@
     flex-shrink: 0;
   }
   .caret.open { transform: rotate(90deg); }
+
+  .rev {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--dimmer);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
 
   .title {
     font-weight: 500;

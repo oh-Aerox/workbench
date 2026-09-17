@@ -23,6 +23,8 @@ pub fn run() {
             commands::project_docs,
             commands::agent_activity,
             commands::search,
+            commands::clear_cache,
+            commands::cache_size,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

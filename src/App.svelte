@@ -10,6 +10,9 @@
     projectTodos,
     agentActivity,
     search as searchApi,
+    cacheSize,
+    clearCache,
+    onCacheChanged,
   } from './lib/api.js'
   import { relTime } from './lib/format.js'
   import ProjectList from './lib/ProjectList.svelte'
@@ -40,6 +43,47 @@
   let searchTimer = null
 
   let currentAgent = $derived(agents.find((a) => a.id === activeAgent) ?? null)
+
+  // 解析缓存的占用。缓存里有各会话的首条 prompt 原文，用户有权知道它在哪、
+  // 有多大，并且能清掉——清完只是下次打开项目慢一点，不丢任何数据。
+  let cacheBytes = $state(0)
+  let clearing = $state(false)
+  let cacheSizeRequest = 0
+
+  function humanBytes(n) {
+    if (!n) return '空'
+    const u = ['B', 'KB', 'MB', 'GB']
+    let i = 0
+    while (n >= 1024 && i < u.length - 1) {
+      n /= 1024
+      i++
+    }
+    return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${u[i]}`
+  }
+
+  async function refreshCacheSize() {
+    const request = ++cacheSizeRequest
+    try {
+      const bytes = await cacheSize()
+      if (request === cacheSizeRequest) cacheBytes = bytes
+    } catch {
+      if (request === cacheSizeRequest) cacheBytes = null
+    }
+  }
+
+  async function onClearCache() {
+    if (clearing) return
+    clearing = true
+    try {
+      await clearCache()
+      repoCache.clear()
+      await refreshCacheSize()
+    } catch (e) {
+      error = String(e)
+    } finally {
+      clearing = false
+    }
+  }
 
   async function selectAgent(agent, keepProject = false) {
     if (!agent.installed) return
@@ -170,6 +214,7 @@
   }
 
   $effect(() => {
+    const unsubscribeCache = onCacheChanged(refreshCacheSize)
     listAgents()
       .then((list) => {
         agents = list
@@ -189,7 +234,11 @@
         if (p) selectProject(p)
       }
     })
-    return () => un.then((f) => f())
+    refreshCacheSize()
+    return () => {
+      unsubscribeCache()
+      un.then((f) => f())
+    }
   })
 </script>
 
@@ -238,6 +287,15 @@
     {#if error}
       <div class="err">{error}</div>
     {/if}
+
+    <div class="foot">
+      <div class="cache">
+        <span title="解析缓存，含各会话的首条 prompt 原文">解析缓存 {cacheBytes === null ? '未知' : humanBytes(cacheBytes)}</span>
+        <button class="clear" onclick={onClearCache} disabled={clearing || cacheBytes === 0}>
+          {clearing ? '清理中…' : '清空'}
+        </button>
+      </div>
+    </div>
   </aside>
 
   <ProjectList
@@ -276,6 +334,8 @@
   }
 
   .rail {
+    display: flex;
+    flex-direction: column;
     background: var(--panel);
     border-right: 1px solid var(--line);
     padding: 10px;
@@ -347,6 +407,29 @@
   .name { font-weight: 500; }
   .sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
   .when { font-size: 10px; color: var(--dimmer); flex-shrink: 0; }
+
+  .foot {
+    margin: auto -10px -10px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--line);
+  }
+  .cache {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--dimmer);
+  }
+  .clear {
+    font-size: 11px;
+    color: var(--dim);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 2px 8px;
+  }
+  .clear:hover:not(:disabled) { color: var(--text); background: var(--panel-2); }
+  .clear:disabled { opacity: 0.4; cursor: default; }
 
   .err {
     margin-top: 12px;

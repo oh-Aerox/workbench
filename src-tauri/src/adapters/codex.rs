@@ -16,13 +16,14 @@
 //! P3 上 SQLite 索引后这一步会变成增量。
 use std::collections::{BTreeMap, BTreeSet};
 
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use super::{
-    cached_collect, local_day, make_title, now_ms, parse_iso_ms, AgentAdapter, RUNNING_WINDOW_MS,
+    cached_collect, fold_plan_snapshots, local_day, lossy_lines, make_title, now_ms, parse_iso_ms,
+    AgentAdapter, RUNNING_WINDOW_MS,
 };
 use crate::model::{
     AgentKind, ParsedSession, PlanEntry, ProjectSummary, SessionSummary, TodoItem,
@@ -72,11 +73,25 @@ fn collect_rollouts() -> Vec<PathBuf> {
     out
 }
 
+/// rollout 的 cwd，带缓存。
+///
+/// `list_projects` 要 peek 全部 rollout，`parse_project` 为了过滤又要 peek 一遍
+/// 全部 rollout，而 `parse_all` 会对每个项目各调一次 `parse_project`：P 个项目
+/// N 个 rollout 就是 `N + P×N` 次文件打开，随数据量平方级放大（Mac 实测 9 项目
+/// 27 rollout，一次热力图刷新约 270 次冗余打开）。真正耗时的全量解析有 index
+/// 缓存兜着，这一步原先没有，缓存暖了之后它反而成了 Codex 路径的主要开销。
+/// 这里按 (大小, mtime) 复用现成的缓存机制，读不到 cwd 的结果同样记下来。
+fn cwd_of(path: &Path) -> Option<String> {
+    crate::index::get_or_peek_cwd(path, || peek_cwd(path))
+}
+
 /// session_meta 固定在文件首行，只读头部即可拿到 cwd。
 fn peek_cwd(path: &Path) -> Option<String> {
     let file = open_readonly(path).ok()?;
     let reader = BufReader::with_capacity(16 * 1024, file);
-    for line in reader.lines().map_while(Result::ok).take(10) {
+    // lossy_lines：一个非 UTF-8 行不该让 cwd 读不到，否则这个 rollout 会被
+    // 整个排除在项目分组之外
+    for line in lossy_lines(reader).take(10) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -99,7 +114,8 @@ fn thread_names() -> BTreeMap<String, String> {
     let Ok(file) = open_readonly(&root.join("session_index.jsonl")) else {
         return map;
     };
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    // lossy_lines：一个坏行不该让后面所有会话名都读不到
+    for line in lossy_lines(BufReader::new(file)) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -126,7 +142,7 @@ impl AgentAdapter for CodexAdapter {
         let mut grouped: BTreeMap<String, (usize, Option<i64>)> = BTreeMap::new();
 
         for path in collect_rollouts() {
-            let Some(cwd) = peek_cwd(&path) else {
+            let Some(cwd) = cwd_of(&path) else {
                 continue;
             };
             let m = mtime_ms(&path);
@@ -156,6 +172,8 @@ impl AgentAdapter for CodexAdapter {
             .collect();
 
         out.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        // 把刚建起来的 cwd 映射落盘，否则下次启动又要全量 peek 一遍
+        crate::index::flush();
         out
     }
 
@@ -163,7 +181,7 @@ impl AgentAdapter for CodexAdapter {
         let names = thread_names();
         let paths: Vec<_> = collect_rollouts()
             .into_iter()
-            .filter(|p| peek_cwd(p).as_deref() == Some(project_id))
+            .filter(|p| cwd_of(p).as_deref() == Some(project_id))
             .collect();
 
         cached_collect(paths, |p| parse_session(p, project_id, &names))
@@ -196,7 +214,8 @@ fn parse_session(
         }
     }
 
-    for line in reader.lines().map_while(Result::ok) {
+    // lossy_lines 而非 lines()：坏字节不能截断后面的内容，理由见其文档
+    for line in lossy_lines(reader) {
         if line.trim().is_empty() {
             continue;
         }
@@ -265,8 +284,6 @@ fn parse_session(
         .or_else(|| first_prompt.as_deref().map(make_title))
         .unwrap_or_else(|| id.chars().take(8).collect());
 
-    let last_write = mtime_ms(path).unwrap_or(0);
-
     let summary = SessionSummary {
         agent: AgentKind::Codex,
         project_id: project_id.to_string(),
@@ -289,9 +306,15 @@ fn parse_session(
         lines_added: 0,
         lines_removed: 0,
         cost_usd: None,
-        running: now_ms() - last_write < RUNNING_WINDOW_MS,
+        // 占位：running 是 now - mtime 的函数，进缓存会被永久固化。
+        // 真正的取值在 `cached_collect` 里按当前 mtime 现算。
+        running: false,
         bytes,
     };
+
+    // update_plan 每调一次落一条记录，记的是同一份清单的不同进度快照，
+    // 原样列出会让一场会话冒出 3–5 张只差勾选进度的卡片
+    let plans = fold_plan_snapshots(plans);
 
     // Codex 不做文件历史追踪，成果盘点的文件清单对它永远是空的
     Some(ParsedSession { summary, files: Vec::new(), daily, first_prompt, plans })
@@ -342,5 +365,6 @@ fn plan_from_call(payload: &Value, at: Option<i64>) -> Option<PlanEntry> {
         body: None,
         items,
         source: "update_plan".into(),
+        revisions: 1,
     })
 }
