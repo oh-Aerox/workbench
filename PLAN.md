@@ -1,6 +1,6 @@
 # 后续计划
 
-实现细节和踩过的坑见 [README.md](README.md)。
+实现细节和踩过的坑见 [docs/DESIGN.md](docs/DESIGN.md)。
 本文件记录待办及必要的完成记录；做完一项再勾掉。代码审查的当前证据与严重程度见 [CODE_REVIEW.md](CODE_REVIEW.md) 顶部复核结论。
 
 ## 需求达成情况
@@ -22,7 +22,7 @@
 
 - [x] ~~**macOS (Apple Silicon) 出包**~~ —— 已完成
   - `CI=true npm run tauri build`。**`CI=true` 不能省**：否则 `create-dmg` 的
-    Finder 美化步骤会卡到 AppleEvent 超时（-1712）而整个出包失败，详见 README「出包」
+    Finder 美化步骤会卡到 AppleEvent 超时（-1712）而整个出包失败，详见 docs/DESIGN.md「出包」
   - 产物 `Agent Workbench_0.1.0_aarch64.dmg` 1.5 MB，`.app` 3.5 MB，arm64 单架构
   - `tauri.conf.json` 补了 `bundle.macOS.minimumSystemVersion: "11.0"`
     （Tauri 默认 10.13 是 Intel 时代的值，arm64 本身就要 11 起步）

@@ -34,7 +34,7 @@
 
 - 位置：`src-tauri/src/adapters/mod.rs::same_path`，由 `commands.rs::ensure_known_project` 调用。
 - 白名单现在只比较实际存在目录的 `canonicalize` 结果；不存在、非目录或无法解析时拒绝。大小写和链接解析交给文件系统，不再将 `/repo/A` 与 `/repo/a` 无条件等同，也不在 Unix 上替换反斜杠。
-- 回归测试覆盖不存在目录、普通文件、目录别名 `src/..`、Windows 分隔符，以及当前文件系统的大小写行为。Windows 本机通过；macOS / 大小写敏感卷尚未实机复验。会话内容仍属于 README 声明的信任边界。
+- 回归测试覆盖不存在目录、普通文件、目录别名 `src/..`、Windows 分隔符，以及当前文件系统的大小写行为。Windows 本机通过；macOS / 大小写敏感卷尚未实机复验。会话内容仍属于 docs/DESIGN.md 声明的信任边界。
 
 **#9 · 已修复（修复前：中，P1）**
 
@@ -176,7 +176,7 @@ RELAY-01 报告，全程只读（`git show` / `git grep` / `git ls-tree`），�
 
 **11. `read_text` 只接受严格 UTF-8** — `repo.rs:167` 的 `String::from_utf8(buf).ok()?` 对 GBK / UTF-16 源文件返回 `None`，被当作"不该扫的文件"缓存成空结果，**静默跳过且不再重试**。中文项目里 GBK 源码并不罕见。建议至少用 `from_utf8_lossy`，或在报告里体现"N 个文件因编码跳过"。
 
-**12. `ensure_known_project` 的白名单比对偏宽，且信任链有循环** — `commands.rs:86-92` 用 `to_lowercase()` 做全路径相等比对：在大小写敏感的文件系统上会放行大小写不同的另一个真实目录。更本质的是，白名单的可信项 `p.path` 来自 `peek_cwd`，即**被解析文件自身的内容**——控制了会话 JSONL 就能把任意目录送进白名单，然后让 TODO 扫描去遍历它并把内容回显。与问题 2 同源。建议用 `Path` 语义比对（或 `canonicalize` 后比对），并在 README 的威胁模型里写明"会话文件内容被视为可信输入"。
+**12. `ensure_known_project` 的白名单比对偏宽，且信任链有循环** — `commands.rs:86-92` 用 `to_lowercase()` 做全路径相等比对：在大小写敏感的文件系统上会放行大小写不同的另一个真实目录。更本质的是，白名单的可信项 `p.path` 来自 `peek_cwd`，即**被解析文件自身的内容**——控制了会话 JSONL 就能把任意目录送进白名单，然后让 TODO 扫描去遍历它并把内容回显。与问题 2 同源。建议用 `Path` 语义比对（或 `canonicalize` 后比对），并在 docs/DESIGN.md 的威胁模型里写明"会话文件内容被视为可信输入"。
 
 **13. `assert_app_owned` 有副作用，并存在 TOCTOU 窗口** — `paths.rs:79` 内部调 `app_data_dir()`，而后者会 `create_dir_all`（`paths.rs:32`）。一个断言函数不该改文件系统。另外断言与实际 `fs::write` 之间存在竞态窗口（可替换目录组件为符号链接）。本地场景风险极低，但把创建目录移到初始化阶段是零成本的改进。
 

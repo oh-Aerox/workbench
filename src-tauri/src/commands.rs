@@ -102,7 +102,7 @@ pub async fn project_todos(project_path: String) -> Result<RepoTodoReport, Strin
 /// **信任链的边界要说清楚**：白名单里的 `p.path` 来自各 adapter 的 `peek_cwd`，
 /// 也就是**被解析的会话文件自身的内容**。控制了会话 JSONL 就能把任意目录送进
 /// 白名单，再让 TODO 扫描去遍历它并把内容回显。这道校验挡的是「前端传来的
-/// 任意路径」，不是「被篡改的会话文件」——后者属于威胁模型之外（见 README），
+/// 任意路径」，不是「被篡改的会话文件」——后者属于威胁模型之外（见 docs/DESIGN.md），
 /// 与计划文件 slug 同源。
 fn ensure_known_project(project_path: &str) -> Result<(), String> {
     let known = AgentKind::all().into_iter().any(|kind| {
